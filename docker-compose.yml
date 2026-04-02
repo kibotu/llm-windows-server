@@ -1,0 +1,35 @@
+services:
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: llm-server
+    ports:
+      - "8899:8899"
+    volumes:
+      - ./models:/models:ro
+      - ./logs:/logs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8899/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    command: >-
+      -m /models/${MODEL_FILE:-Qwen3.5-9B-Q4_K_M.gguf}
+      -c ${CONTEXT_SIZE:-32768}
+      -ctk q4_0
+      -ctv q4_0
+      -ngl 99
+      -b 2048
+      -ub 512
+      --host 0.0.0.0
+      --port 8899
+      --flash-attn on
+      --reasoning ${REASONING:-off}

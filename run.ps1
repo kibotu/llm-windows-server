@@ -1,269 +1,200 @@
 <#
 .SYNOPSIS
-    Start or restart the LLM server.
-    Safe to run multiple times - kills old instance, frees port, starts fresh.
-
-.DESCRIPTION
-    Manages the llama-server lifecycle:
-    - Kills any existing llama-server processes
-    - Frees port 8899 if occupied
-    - Launches llama-server with optimized flags
-    - Waits for health check
-    - Streams logs
+    Start or restart the LLM server via Docker.
 
 .PARAMETER Model
     Which model to load: "9b" (default) or "35b"
 
 .PARAMETER Restart
-    Kill existing server before starting (default behavior)
+    Force restart the container
 
 .PARAMETER Context
     Context window size (default: 32768)
 
-.PARAMETER NoThinking
-    Disable thinking mode (default: true)
+.PARAMETER Thinking
+    Enable thinking/reasoning mode (default: false)
+
+.PARAMETER Stop
+    Stop the server
 
 .EXAMPLE
     .\run.ps1                  # Start with 9B model
     .\run.ps1 -Model 35b       # Start with 35B MoE model
     .\run.ps1 -Restart         # Restart server
-    .\run.ps1 -Context 16384   # Smaller context window
+    .\run.ps1 -Stop            # Stop server
 #>
 
-[CmdletBinding()]
 param(
     [ValidateSet("9b", "35b")]
     [string]$Model = "9b",
 
     [switch]$Restart,
 
-    [ValidateSet(8192, 16384, 32768, 65536)]
     [int]$Context = 32768,
 
-    [switch]$NoThinking = $true
+    [switch]$Thinking,
+
+    [switch]$Stop
 )
 
-Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
-$ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$EnvFile     = Join-Path $ScriptDir ".env"
-$ModelsDir   = Join-Path $ScriptDir "models"
-$LogsDir     = Join-Path $ScriptDir "logs"
-$LlamaDir    = Join-Path $ScriptDir "llama.cpp"
-$BuildDir    = Join-Path $LlamaDir "build"
-$ServerExe   = Join-Path $BuildDir "bin\Release\llama-server.exe"
-$ServerPort  = 8899
-$LogFile     = Join-Path $LogsDir "server.log"
-$PidFile     = Join-Path $ScriptDir ".server.pid"
-
-# ---------- helpers ----------
-
-function Write-Step([string]$Msg) {
-    Write-Host "`n=== $Msg" -ForegroundColor Cyan
+# Ensure Docker is in PATH (for D: drive installation)
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    $dockerBin = @(
+        "D:\Docker\resources\bin",
+        "C:\Program Files\Docker\Docker\resources\bin"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($dockerBin) {
+        $env:PATH = "$dockerBin;$env:PATH"
+    }
 }
 
-function Write-Ok([string]$Msg) {
-    Write-Host "  OK $Msg" -ForegroundColor Green
-}
+function Write-Step([string]$Msg) { Write-Host "`n=== $Msg" -ForegroundColor Cyan }
+function Write-Ok([string]$Msg) { Write-Host "  OK $Msg" -ForegroundColor Green }
+function Write-Warn([string]$Msg) { Write-Host "  -- $Msg" -ForegroundColor Yellow }
+function Write-Err([string]$Msg) { Write-Host "  !! $Msg" -ForegroundColor Red }
+function Write-Info([string]$Msg) { Write-Host "  -> $Msg" -ForegroundColor White }
 
-function Write-Warn([string]$Msg) {
-    Write-Host "  -- $Msg" -ForegroundColor Yellow
-}
+# Ensure Docker Desktop is running
+function Start-DockerDesktop {
+    $docker = Get-Command docker -ErrorAction SilentlyContinue
+    if (-not $docker) {
+        Write-Err "Docker not found. Run .\setup.ps1 first."
+        exit 1
+    }
 
-function Write-Err([string]$Msg) {
-    Write-Host "  !! $Msg" -ForegroundColor Red
-}
-
-function Write-Info([string]$Msg) {
-    Write-Host "  -> $Msg" -ForegroundColor White
-}
-
-function Kill-ProcessOnPort([int]$Port) {
-    $connections = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
-    if ($connections) {
-        foreach ($conn in $connections) {
-            $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
-            if ($proc) {
-                Write-Warn "Port $Port held by $($proc.ProcessName) (PID $($proc.Id)) - killing"
-                Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Milliseconds 500
+    $dockerInfo = docker info 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Docker Desktop not running, starting..."
+        
+        # Find Docker Desktop executable
+        $dockerExe = @(
+            "D:\Docker\Docker Desktop.exe",
+            "C:\Program Files\Docker\Docker\Docker Desktop.exe",
+            "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        
+        if (-not $dockerExe) {
+            Write-Err "Docker Desktop executable not found"
+            exit 1
+        }
+        
+        Start-Process $dockerExe -WindowStyle Hidden
+        
+        $timeout = 120
+        $start = Get-Date
+        while ($true) {
+            Start-Sleep -Seconds 3
+            $dockerInfo = docker info 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "Docker Desktop started"
+                return
             }
-        }
-    }
-}
-
-function Kill-LlamaServer {
-    $processes = Get-Process -Name "llama-server" -ErrorAction SilentlyContinue
-    if ($processes) {
-        foreach ($p in $processes) {
-            Write-Warn "Stopping llama-server (PID $($p.Id))..."
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-        }
-        Start-Sleep -Seconds 1
-    }
-
-    if (Test-Path $PidFile) {
-        $oldPid = Get-Content $PidFile -ErrorAction SilentlyContinue
-        if ($oldPid) {
-            $proc = Get-Process -Id ([int]$oldPid) -ErrorAction SilentlyContinue
-            if ($proc -and $proc.ProcessName -eq "llama-server") {
-                Write-Warn "Stopping llama-server via PID file (PID $oldPid)..."
-                Stop-Process -Id ([int]$oldPid) -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 1
+            if (((Get-Date) - $start).TotalSeconds -gt $timeout) {
+                Write-Err "Docker Desktop failed to start within ${timeout}s"
+                exit 1
             }
+            Write-Host "." -NoNewline -ForegroundColor Gray
         }
-        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     }
 }
 
-function Wait-PortFree([int]$Port, [int]$TimeoutSec = 10) {
-    $start = Get-Date
-    while ((Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue)) {
-        if (((Get-Date) - $start).TotalSeconds -gt $TimeoutSec) {
-            Write-Err "Port $Port still in use after ${TimeoutSec}s"
-            return $false
-        }
-        Start-Sleep -Milliseconds 200
-    }
-    return $true
-}
-
-function Wait-ServerReady([string]$Url, [int]$TimeoutSec = 60) {
-    Write-Host "  Waiting for server to be ready..." -ForegroundColor Gray
-    $start = Get-Date
-    while ($true) {
-        try {
-            $response = Invoke-WebRequest -Uri "$Url/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-            if ($response.StatusCode -eq 200) {
-                return $true
-            }
-        } catch {}
-        if (((Get-Date) - $start).TotalSeconds -gt $TimeoutSec) {
-            return $false
-        }
-        Start-Sleep -Milliseconds 500
-        Write-Host "." -NoNewline -ForegroundColor Gray
-    }
-}
-
+# Get local IP for connection info
 function Get-LocalIp {
-    $ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "Ethernet*" -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "169.254.*" } | Select-Object -First 1).IPAddress
-    if (-not $ip) {
-        $ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "Wi-Fi*" -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "169.254.*" } | Select-Object -First 1).IPAddress
-    }
-    if (-not $ip) {
-        $ip = "127.0.0.1"
-    }
-    return $ip
+    $adapters = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | 
+        Where-Object { $_.IPAddress -notlike "169.254.*" -and $_.IPAddress -notlike "127.*" -and $_.PrefixOrigin -ne "WellKnown" })
+    
+    if ($adapters.Count -eq 0) { return "127.0.0.1" }
+    
+    $ethernet = @($adapters | Where-Object { $_.InterfaceAlias -like "Ethernet*" })
+    if ($ethernet.Count -gt 0) { return $ethernet[0].IPAddress }
+    
+    $wifi = @($adapters | Where-Object { $_.InterfaceAlias -like "Wi-Fi*" })
+    if ($wifi.Count -gt 0) { return $wifi[0].IPAddress }
+    
+    return $adapters[0].IPAddress
 }
 
-# ---------- Validation ----------
+# Main
+Write-Step "LLM Server (Docker)"
 
-Write-Step "LLM Server - Port $ServerPort"
+Start-DockerDesktop
 
-if (-not (Test-Path $ServerExe)) {
-    Write-Err "llama-server.exe not found at $ServerExe"
-    Write-Info "Run .\setup.ps1 first"
-    exit 1
+# Handle stop
+if ($Stop) {
+    Write-Step "Stopping server"
+    docker compose -f "$ScriptDir\docker-compose.yml" down 2>&1 | Out-Null
+    Write-Ok "Server stopped"
+    exit 0
 }
 
+# Select model file
 $ModelFile = if ($Model -eq "35b") {
-    $f = Get-ChildItem $ModelsDir -Filter "*35B-A3B*Q4_K_XL*" -ErrorAction SilentlyContinue
-    if (-not $f) {
-        $f = Get-ChildItem $ModelsDir -Filter "*35B-A3B*" -ErrorAction SilentlyContinue
-    }
-    $f
+    $f = Get-ChildItem "$ScriptDir\models" -Filter "*35B-A3B*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f) { $f.Name } else { "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf" }
 } else {
-    $f = Get-ChildItem $ModelsDir -Filter "*9B*Q4_K_M*" -ErrorAction SilentlyContinue
-    if (-not $f) {
-        $f = Get-ChildItem $ModelsDir -Filter "*9B*" -ErrorAction SilentlyContinue
-    }
-    $f
+    $f = Get-ChildItem "$ScriptDir\models" -Filter "*9B*Q4_K_M*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f) { $f.Name } else { "Qwen3.5-9B-Q4_K_M.gguf" }
 }
 
-if (-not $ModelFile) {
-    Write-Err "No $Model model found in $ModelsDir"
+$ModelPath = Join-Path "$ScriptDir\models" $ModelFile
+if (-not (Test-Path $ModelPath)) {
+    Write-Err "Model not found: $ModelPath"
     Write-Info "Run .\setup.ps1 to download models"
     exit 1
 }
 
-$ModelPath = $ModelFile[0].FullName
-$ModelSize = [math]::Round($ModelFile[0].Length / 1GB, 2)
-Write-Info "Model: $($ModelFile[0].Name) ($ModelSize GB)"
+$ModelSize = [math]::Round((Get-Item $ModelPath).Length / 1GB, 2)
+Write-Info "Model: $ModelFile ($ModelSize GB)"
+Write-Info "Context: $Context tokens"
+Write-Info "Reasoning: $(if ($Thinking) { 'on' } else { 'off' })"
 
-# ---------- Kill existing ----------
+# Set environment for docker-compose
+$env:MODEL_FILE = $ModelFile
+$env:CONTEXT_SIZE = $Context.ToString()
+$env:REASONING = if ($Thinking) { "on" } else { "off" }
 
-Write-Step "Cleaning up"
-Kill-LlamaServer
-Kill-ProcessOnPort $ServerPort
-
-if (-not (Wait-PortFree $ServerPort)) {
-    Write-Err "Could not free port $ServerPort"
-    exit 1
-}
-Write-Ok "Port $ServerPort is free"
-
-# ---------- Build command ----------
-
-$chatTemplate = ""
-if ($NoThinking) {
-    $chatTemplate = '--chat-template-kwargs', '{"enable_thinking": false}'
+# Restart if requested or already running
+if ($Restart) {
+    Write-Step "Restarting server"
+    docker compose -f "$ScriptDir\docker-compose.yml" down 2>&1 | Out-Null
 }
 
-$args = @(
-    "-m", $ModelPath
-    "-c", $Context.ToString()
-    "-ctk", "q8_0"
-    "-ctv", "q8_0"
-    "-ngl", "99"
-    "--host", "0.0.0.0"
-    "--port", $ServerPort.ToString()
-    "--flash-attn"
-) + $chatTemplate
-
+# Start container
 Write-Step "Starting server"
-Write-Info "Command: llama-server.exe $($args -join ' ')"
+docker compose -f "$ScriptDir\docker-compose.yml" up -d 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
 
-if (-not (Test-Path $LogsDir)) {
-    New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
-}
-
-if (Test-Path $LogFile) {
-    Clear-Content $LogFile
-}
-
-# ---------- Launch ----------
-
-$psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = $ServerExe
-$psi.Arguments = $args -join " "
-$psi.WorkingDirectory = Split-Path $ServerExe
-$psi.UseShellExecute = $false
-$psi.RedirectStandardOutput = $true
-$psi.RedirectStandardError = $true
-$psi.CreateNoWindow = $true
-
-$process = [System.Diagnostics.Process]::Start($psi)
-
-$process.Id | Out-File $PidFile -Force
-
-Write-Ok "Server started (PID $($process.Id))"
-
-# ---------- Wait for ready ----------
-
-$ready = Wait-ServerReady -Url "http://localhost:$ServerPort" -TimeoutSec 120
-
-if (-not $ready) {
-    Write-Err "Server did not become ready within 120s"
-    Write-Info "Check log: $LogFile"
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Failed to start container"
     exit 1
 }
 
-Write-Ok "Server is ready!"
+Write-Ok "Container started"
 
-# ---------- Print connection info ----------
+# Wait for health check
+Write-Host "  Waiting for server to be ready..." -ForegroundColor Gray
+$timeout = 180
+$start = Get-Date
+while ($true) {
+    $health = docker inspect --format='{{.State.Health.Status}}' llm-server 2>$null
+    if ($health -eq "healthy") {
+        Write-Host ""
+        Write-Ok "Server is ready!"
+        break
+    }
+    if (((Get-Date) - $start).TotalSeconds -gt $timeout) {
+        Write-Host ""
+        Write-Err "Server did not become healthy within ${timeout}s"
+        Write-Info "Check logs: docker compose logs"
+        exit 1
+    }
+    Start-Sleep -Seconds 2
+    Write-Host "." -NoNewline -ForegroundColor Gray
+}
 
+# Print connection info
 $localIp = Get-LocalIp
 
 Write-Host ""
@@ -271,47 +202,25 @@ Write-Host "===========================================================" -Foregr
 Write-Host "  SERVER RUNNING" -ForegroundColor Green
 Write-Host "===========================================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "  Local:        http://localhost:$ServerPort/v1" -ForegroundColor White
-Write-Host "  LAN:          http://$localIp`:$ServerPort/v1" -ForegroundColor White
-Write-Host "  Tailscale:    http://<tailscale-ip>`:$ServerPort/v1" -ForegroundColor White
+Write-Host "  Local:        http://localhost:8899/v1" -ForegroundColor White
+Write-Host "  LAN:          http://${localIp}:8899/v1" -ForegroundColor White
+Write-Host "  Tailscale:    http://<tailscale-ip>:8899/v1" -ForegroundColor White
 Write-Host ""
 Write-Host "  API Key:      any-string (not validated)" -ForegroundColor Gray
-Write-Host "  Log file:     $LogFile" -ForegroundColor Gray
-Write-Host "  PID:          $($process.Id)" -ForegroundColor Gray
+Write-Host "  Container:    llm-server" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  MacBook config:" -ForegroundColor Cyan
-Write-Host "  export OPENAI_BASE_URL=http://$localIp`:$ServerPort/v1" -ForegroundColor Gray
+Write-Host "  export OPENAI_BASE_URL=http://${localIp}:8899/v1" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  Stop server:    Stop-Process -Id $($process.Id) -Force" -ForegroundColor Gray
-Write-Host "  Restart:        .\run.ps1 -Restart" -ForegroundColor Gray
+Write-Host "  Commands:" -ForegroundColor Cyan
+Write-Host "  .\run.ps1 -Stop           # Stop server" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Restart        # Restart server" -ForegroundColor Gray
+Write-Host "  docker compose logs -f    # Stream logs" -ForegroundColor Gray
 Write-Host ""
 Write-Host "===========================================================" -ForegroundColor Green
 
-# ---------- Stream logs ----------
-
-Write-Host "`n[Server output - Ctrl+C to stop streaming, server keeps running]" -ForegroundColor DarkGray
+# Stream logs
+Write-Host "`n[Container logs - Ctrl+C to stop streaming, server keeps running]" -ForegroundColor DarkGray
 Write-Host ""
 
-try {
-    while (-not $process.HasExited) {
-        $line = $process.StandardOutput.ReadLine()
-        if ($line) {
-            Write-Host $line
-            Add-Content $LogFile $line
-        }
-        $errLine = $process.StandardError.ReadLine()
-        if ($errLine) {
-            Write-Host $errLine -ForegroundColor Yellow
-            Add-Content $LogFile "ERR: $errLine"
-        }
-        Start-Sleep -Milliseconds 100
-    }
-} catch [System.Management.Automation.RuntimeException] {
-    # Stream ended - normal when process exits
-}
-
-if ($process.HasExited) {
-    Write-Warn "Server exited with code $($process.ExitCode)"
-    Write-Info "Check log: $LogFile"
-    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-}
+docker compose -f "$ScriptDir\docker-compose.yml" logs -f
