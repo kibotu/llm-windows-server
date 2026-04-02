@@ -48,7 +48,22 @@ This:
 .\run.ps1 -Restart         # Restart
 ```
 
-### 3. Connect from Mac
+### 3. Test
+
+```powershell
+.\test.ps1                        # Test locally
+.\test.ps1 -Server 192.168.1.100  # Test from another machine
+```
+
+### 4. Benchmark
+
+```powershell
+.\benchmark.ps1                   # Measure tokens/second
+.\benchmark.ps1 -Runs 5           # More runs for accuracy
+.\benchmark.ps1 -Tokens 500       # Longer generations
+```
+
+### 5. Connect from Mac
 
 ```bash
 export OPENAI_BASE_URL=http://<windows-ip>:8899/v1
@@ -58,10 +73,26 @@ export OPENAI_BASE_URL=http://<windows-ip>:8899/v1
 
 | Model | Size | Speed | Use Case |
 |-------|------|-------|----------|
-| Qwen3.5-9B | ~5 GB | 90+ t/s | Fast agentic loops |
+| Qwen3.5-9B | ~5 GB | 80+ t/s | Fast agentic loops |
 | Qwen3.5-35B-A3B | ~21 GB | 35+ t/s | Complex reasoning, code gen |
 
 The 35B model is MoE — 35B params but only 3B activate per token.
+
+### Which model when?
+
+**Use 9B for regular work:**
+- Code edits, refactors, quick fixes
+- Tool calling and agentic loops (latency matters)
+- Chat, Q&A, documentation
+- Anything where speed > depth
+
+**Use 35B for planning:**
+- Architecture decisions, system design
+- Complex multi-step reasoning
+- Debugging tricky issues
+- Code review, security analysis
+
+A practical workflow: run 9B by default (`.\run.ps1`), switch to 35B (`.\run.ps1 -Model 35b -Restart`) when you need deeper thinking, then switch back.
 
 ## Configuration
 
@@ -85,6 +116,8 @@ docker compose down        # Stop
 docker-compose.yml    Container definition
 setup.ps1             One-time setup
 run.ps1               Start/stop server
+test.ps1              Test connectivity
+benchmark.ps1         Measure throughput
 models/               Downloaded models (gitignored)
 ```
 
