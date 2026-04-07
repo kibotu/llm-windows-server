@@ -47,10 +47,6 @@
     ]
   },
   "autoupdate": false,
-  "instructions": [
-    "CONTRIBUTING.md",
-    "docs/**/*.md"
-  ],
   "permission": {
     "bash": "allow",
     "edit": "allow",
