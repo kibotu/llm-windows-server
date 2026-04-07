@@ -4,7 +4,7 @@ Turn your idle Windows gaming rig into a low-latency, private LLM inference serv
 
 ## Why
 
-Cloud LLMs are slow, cost money per token, and log every prompt. Meanwhile your RTX 4080 sits at 3% utilization between gaming sessions. This project bridges that gap: a Docker-based OpenAI-compatible API server that runs Qwen models entirely on your hardware. Any client on your network — MacBook, IDE, scripts — connects and gets instant, private inference.
+Cloud LLMs are great — until you're sending hundreds of agentic round trips, hitting rate limits, or working with code you'd rather not leave your network. Meanwhile your RTX 4080 sits at 3% utilization between gaming sessions. This project bridges that gap: a Docker-based OpenAI-compatible API server that runs Qwen models entirely on your hardware. Any client on your network — MacBook, IDE, scripts — connects and gets instant, private inference.
 
 The sweet spot is **agentic work**: tool calling, code generation, multi-step reasoning. These workloads compound latency with every round trip. Running locally means zero per-token cost, no rate limits, and your code never leaves your LAN.
 
