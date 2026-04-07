@@ -1,0 +1,59 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "llama-at-home": {
+      "name": "Llama.cpp (RTX4080)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://1.2.3.4:8899/v1",
+        "timeout": 180000,
+        "chunkTimeout": 30000
+      },
+      "models": {
+        "Qwen3.5-9B": {
+          "name": "Qwen3.5-9B",
+          "limit": {
+            "context": 32000,
+            "output": 6000
+          }
+        }
+      }
+    }
+  },
+  "model": "llama-at-home/Qwen3.5-9B",
+  "small_model": "llama-at-home/Qwen3.5-9B",
+  "snapshot": false,
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "reserved": 4000
+  },
+  "tools": {
+    "write": true,
+    "read": true,
+    "bash": true,
+    "edit": true,
+    "browser": false
+  },
+  "watcher": {
+    "ignore": [
+      "node_modules/**",
+      "dist/**",
+      "build/**",
+      ".git/**",
+      ".next/**",
+      "venv/**",
+      "env/**"
+    ]
+  },
+  "autoupdate": false,
+  "instructions": [
+    "CONTRIBUTING.md",
+    "docs/**/*.md"
+  ],
+  "permission": {
+    "bash": "allow",
+    "edit": "allow",
+    "write": "allow"
+  }
+}
