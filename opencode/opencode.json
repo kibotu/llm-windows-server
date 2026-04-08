@@ -13,7 +13,7 @@
         "Qwen3.5-9B": {
           "name": "Qwen3.5-9B",
           "limit": {
-            "context": 32000,
+            "context": 128000,
             "output": 6000
           }
         }
@@ -26,7 +26,7 @@
   "compaction": {
     "auto": true,
     "prune": true,
-    "reserved": 4000
+    "reserved": 10000
   },
   "tools": {
     "write": true,
@@ -48,7 +48,9 @@
   },
   "autoupdate": false,
   "permission": {
-    "bash": "allow",
+    "bash": {
+      "deny": ["git"]
+    },
     "edit": "allow",
     "write": "allow"
   }
