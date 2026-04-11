@@ -2,8 +2,8 @@ services:
   llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: llm-server
-    ports:
-      - "8899:8899"
+    expose:
+      - "8888"
     volumes:
       - ./models:/models:ro
       - ./logs:/logs
@@ -16,7 +16,7 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8899/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -30,6 +30,26 @@ services:
       -b 2048
       -ub 512
       --host 0.0.0.0
-      --port 8899
+      --port 8888
       --flash-attn on
       --reasoning ${REASONING:-off}
+      --metrics
+
+  usage-tracker:
+    build: .
+    container_name: usage-tracker
+    ports:
+      - "8899:8899"
+    volumes:
+      - ./usage_data.json:/data/usage_data.json:rw
+    depends_on:
+      llm:
+        condition: service_healthy
+    environment:
+      - LLAMA_SERVER_URL=http://llm:8888
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8899/usage"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

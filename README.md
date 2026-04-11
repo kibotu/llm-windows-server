@@ -1,126 +1,76 @@
-# llm-server
+# LLM Server with Benchmarking
 
-Run Qwen models locally on Windows with an NVIDIA GPU via Docker. Serve an OpenAI-compatible API to any client — your MacBook, IDE plugins, or scripts — over your LAN or Tailscale.
-
-## Why
-
-Cloud LLM APIs are slow, expensive, and log everything. A 4080 with 16 GB VRAM and 96 GB system RAM is idle most of the time. This project turns that idle hardware into a low-latency, private inference server that you own.
-
-The primary workload is **agentic work** — tool calling, code generation, multi-step reasoning — where round-trip latency compounds and privacy matters. Running locally means zero per-token cost, no rate limits, and no data leaves your network.
-
-## Features
-
-- **OpenAI-compatible API** — works with Cursor, Continue, Claude Desktop, any OpenAI SDK client
-- **Two models** — Qwen3.5-9B (90+ tok/s, 100% GPU) and Qwen3.5-35B-A3B (35+ tok/s, MoE)
-- **Docker-based** — no build step, no CUDA toolkit, no cmake
-- **Health checks** — container auto-restarts on failure
-- **Tailscale-ready** — secure remote access without port forwarding
-
-## Requirements
-
-| Component | Minimum |
-|-----------|---------|
-| GPU | NVIDIA RTX 3060 12 GB |
-| RAM | 32 GB |
-| OS | Windows 10/11 |
-| Docker Desktop | Latest with WSL2 backend |
+LLM server running in Docker with usage tracking and high-load benchmarking tools.
 
 ## Quick Start
 
-### 1. Install
-
-```powershell
-.\setup.ps1
+### 1. Start Server (32k context)
+```bash
+docker-compose up -d
 ```
 
-This:
-1. Verifies Docker Desktop + GPU access
-2. Pulls the `ghcr.io/ggml-org/llama.cpp:server-cuda` image
-3. Downloads Qwen3.5-9B (~5 GB) and Qwen3.5-35B-A3B (~21 GB)
-4. Creates a firewall rule for port 8899
-
-### 2. Run
-
-```powershell
-.\run.ps1                  # 9B model (fast)
-.\run.ps1 -Model 35b       # 35B model (smarter)
-.\run.ps1 -Stop            # Stop server
-.\run.ps1 -Restart         # Restart
+### 2. Start Server (128k context)
+```bash
+cp .env.128k .env
+docker-compose restart llm
 ```
 
-### 3. Test
+### 3. Run Benchmark
+```bash
+# Install dependencies
+pip install -r requirements-benchmark.txt
 
-```powershell
-.\test.ps1                        # Test locally
-.\test.ps1 -Server 192.168.1.100  # Test from another machine
+# Run benchmark
+python benchmark.py --test standard
+
+# Or use helper script (Windows)
+.\run-benchmark.ps1 standard
+
+# Or use helper script (Linux/Mac)
+./run-benchmark.sh standard
 ```
 
-### 4. Benchmark
+## Benchmark Test Suites
 
-```powershell
-.\benchmark.ps1                   # Measure tokens/second
-.\benchmark.ps1 -Runs 5           # More runs for accuracy
-.\benchmark.ps1 -Tokens 500       # Longer generations
-```
+- `quick` - Quick test (~30s)
+- `standard` - Recommended (~5-10 min)
+- `stress` - High load (~10-15 min)
+- `context-scaling` - Test 1k to 128k contexts (~15-20 min)
+- `all` - Complete suite (~30-45 min)
 
-### 5. Connect from Mac
+## Analyze Results
 
 ```bash
-export OPENAI_BASE_URL=http://<windows-ip>:8899/v1
+# Summary
+python analyze-benchmark.py benchmark_results.json
+
+# Detailed with recommendations
+python analyze-benchmark.py benchmark_results.json --all
 ```
 
-## Model Selection
+## Expected Performance (RTX 4080, 16GB VRAM)
 
-| Model | Size | Speed | Use Case |
-|-------|------|-------|----------|
-| Qwen3.5-9B | ~5 GB | 80+ t/s | Fast agentic loops |
-| Qwen3.5-35B-A3B | ~21 GB | 35+ t/s | Complex reasoning, code gen |
+| Context | RPS | Latency (P50) | VRAM |
+|---------|-----|---------------|------|
+| 1k      | 5-10 | 200-500ms | ~8 GB |
+| 10k     | 2-5 | 500-2000ms | ~9 GB |
+| 50k     | 0.5-1.5 | 2-5s | ~12 GB |
+| 100k    | 0.2-0.5 | 5-15s | ~15 GB |
+| 128k    | 0.1-0.3 | 10-30s | ~16 GB |
 
-The 35B model is MoE — 35B params but only 3B activate per token.
+**Max context before VRAM spillover: ~138k tokens**
 
-### Which model when?
+## Monitor GPU
 
-**Use 9B for regular work:**
-- Code edits, refactors, quick fixes
-- Tool calling and agentic loops (latency matters)
-- Chat, Q&A, documentation
-- Anything where speed > depth
-
-**Use 35B for planning:**
-- Architecture decisions, system design
-- Complex multi-step reasoning
-- Debugging tricky issues
-- Code review, security analysis
-
-A practical workflow: run 9B by default (`.\run.ps1`), switch to 35B (`.\run.ps1 -Model 35b -Restart`) when you need deeper thinking, then switch back.
+```bash
+nvidia-smi -l 1
+```
 
 ## Configuration
 
-```powershell
-.\run.ps1 -Context 16384   # Smaller context (more VRAM headroom)
-.\run.ps1 -Thinking        # Enable reasoning mode
-```
-
-## Docker Commands
-
-```powershell
-docker compose logs -f     # Stream logs
-docker ps                  # Check status
-docker compose down        # Stop
-```
-
-## File Layout
-
-```
-.env                  HuggingFace token (gitignored)
-docker-compose.yml    Container definition
-setup.ps1             One-time setup
-run.ps1               Start/stop server
-test.ps1              Test connectivity
-benchmark.ps1         Measure throughput
-models/               Downloaded models (gitignored)
-```
-
-## License
-
-Scripts: Public domain. Models: Apache 2.0 (Qwen).
+- `docker-compose.yml` - Server configuration
+- `.env` - Environment variables (CONTEXT_SIZE, MODEL_FILE)
+- `.env.128k` - Pre-configured for 128k context
+- `benchmark.py` - Benchmark script
+- `analyze-benchmark.py` - Results analysis
+- `run-benchmark.ps1` / `run-benchmark.sh` - Helper scripts
