@@ -1,3 +1,18 @@
+# LLM service: llama.cpp HTTP server (CUDA). Tuning reference:
+#   -m MODEL_FILE     Main GGUF path inside container (/models/...).
+#   -c            CONTEXT_SIZE   Max context slots (tokens). Lower = less VRAM, faster prefill.
+#   -ctk / -ctv   KV cache type for K/V tensors (q4_0 here: smaller KV, slight quality/speed tradeoff).
+#   -ngl          GPU layers for main model (99 = all layers on GPU when supported).
+#   -t            THREADS        CPU threads (prompt processing, sampling, ops not on GPU). See README.
+#   -b            BATCH_SIZE     Physical batch; larger can raise throughput, uses more VRAM.
+#   -ub           UBATCH_SIZE    Micro-batch; must be <= -b; often b/4–b/2.
+#   --flash-attn  Flash attention (faster attention on supported GPUs).
+#   --reasoning   REASONING      Extended reasoning mode when model/server supports it (on/off).
+#   --jinja       Chat templates via Jinja (needed for Gemma and many instruct models).
+#   --metrics     Expose Prometheus-style metrics endpoint.
+#   SPECULATIVE_FLAGS (optional): draft model -md, -ngld, --draft-min, --draft-max (see README).
+#   EXTRA_LLAMA_FLAGS (optional): pass-through for advanced llama-server flags.
+# Env vars are set by run.ps1 or a root .env file; defaults below apply if unset.
 services:
   llm:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
@@ -27,14 +42,17 @@ services:
       -ctk q4_0
       -ctv q4_0
       -ngl 99
-      -b 2048
-      -ub 512
+      -t ${THREADS:-20}
+      -b ${BATCH_SIZE:-2048}
+      -ub ${UBATCH_SIZE:-512}
       --host 0.0.0.0
       --port 8888
       --flash-attn on
       --reasoning ${REASONING:-off}
       --jinja
       --metrics
+      ${SPECULATIVE_FLAGS:-}
+      ${EXTRA_LLAMA_FLAGS:-}
 
   usage-tracker:
     build: .

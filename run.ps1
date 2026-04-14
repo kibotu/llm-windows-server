@@ -14,6 +14,31 @@
 .PARAMETER Thinking
     Enable thinking/reasoning mode (default: false)
 
+.PARAMETER Threads
+    CPU thread count for llama.cpp (-t). Use 0 for auto (recommended): scales with logical CPU count
+    (e.g. 32 logical -> 20 threads on a high-end desktop). After benchmarking, try 16-24 on Core i9-class CPUs; see README.
+
+.PARAMETER Batch
+    Physical batch size -b (tokens batched for matmuls). Higher can improve throughput at the cost of VRAM.
+
+.PARAMETER UBatch
+    Micro-batch size -ub (chunk size within -b). Must be <= -b; often set to roughly half of -b for tuning.
+
+.PARAMETER DraftModelFile
+    Optional draft GGUF filename under models/; enables speculative decoding (-md) when set.
+
+.PARAMETER DraftMin
+    --draft-min: minimum draft tokens before target verification (typical range 2-8).
+
+.PARAMETER DraftMax
+    --draft-max: maximum draft tokens per speculative step (typical range 8-32; lower if VRAM or acceptance is poor).
+
+.PARAMETER DraftGpuLayers
+    -ngld: GPU layers for the draft model (0 = CPU draft, 99 = all on GPU when supported).
+
+.PARAMETER ExtraFlags
+    Appended verbatim to the llama-server command (advanced; see llama.cpp server --help).
+
 .PARAMETER Stop
     Stop the server
 
@@ -22,6 +47,9 @@
     .\run.ps1 -Model 35b       # Start with 35B MoE model
     .\run.ps1 -Model gemma312  # Gemma 3 12B IT (.\setup.ps1 -IncludeGemma312)
     .\run.ps1 -Model gemma426ba4b # Gemma 4 26B-A4B IT (.\setup.ps1 -IncludeGemma426BA4B)
+    .\run.ps1 -Batch 4096 -UBatch 1024              # uses auto thread count
+    .\run.ps1 -Threads 24 -Batch 4096 -UBatch 1024  # many-core CPU (benchmark vs auto)
+    .\run.ps1 -DraftModelFile Qwen3-1.7B-Q4_K_M.gguf -DraftMax 12 -DraftMin 4
     .\run.ps1 -Restart         # Restart server
     .\run.ps1 -Stop            # Stop server
 #>
@@ -35,6 +63,23 @@ param(
     [int]$Context = 32768,
 
     [switch]$Thinking,
+
+    [ValidateRange(0, 256)]
+    [int]$Threads = 0,
+
+    [int]$Batch = 2048,
+
+    [int]$UBatch = 512,
+
+    [string]$DraftModelFile = "",
+
+    [int]$DraftMin = 5,
+
+    [int]$DraftMax = 16,
+
+    [int]$DraftGpuLayers = 99,
+
+    [string]$ExtraFlags = "",
 
     [switch]$Stop
 )
@@ -50,6 +95,24 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     ) | Where-Object { Test-Path $_ } | Select-Object -First 1
     if ($dockerBin) {
         $env:PATH = "$dockerBin;$env:PATH"
+    }
+}
+
+# --- llama.cpp -t (CPU threads) -------------------------------------------------
+# With -ngl 99 the GPU runs the transformer; the CPU still does tokenization, sampling, and
+# bookkeeping. Too few threads underuses a fast CPU; too many can add overhead.
+# Auto picks a sensible default from logical CPU count (Environment.ProcessorCount on Windows).
+$LogicalCpus = [Environment]::ProcessorCount
+$ThreadsFromAuto = $false
+if ($Threads -le 0) {
+    $ThreadsFromAuto = $true
+    if ($LogicalCpus -ge 32) {
+        # e.g. Core i9-13900K (32 logical):20 is a strong default; try 16-24 in benchmarks.
+        $Threads = 20
+    } elseif ($LogicalCpus -ge 16) {
+        $Threads = 12
+    } else {
+        $Threads = [math]::Max(4, [int][math]::Ceiling($LogicalCpus / 2.0))
     }
 }
 
@@ -166,11 +229,41 @@ $ModelSize = [math]::Round((Get-Item $ModelPath).Length / 1GB, 2)
 Write-Info "Model: $ModelFile ($ModelSize GB)"
 Write-Info "Context: $Context tokens"
 Write-Info "Reasoning: $(if ($Thinking) { 'on' } else { 'off' })"
+if ($ThreadsFromAuto) {
+    Write-Info "Threads: $Threads (auto from $LogicalCpus logical CPUs)"
+} else {
+    Write-Info "Threads: $Threads (manual)"
+}
+Write-Info "Batch/UBatch: $Batch/$UBatch"
+
+if ($Batch -lt $UBatch) {
+    Write-Warn "Batch ($Batch) is smaller than UBatch ($UBatch). This usually hurts throughput."
+}
+
+$SpeculativeFlags = ""
+if (-not [string]::IsNullOrWhiteSpace($DraftModelFile)) {
+    $draftPath = [System.IO.Path]::GetFullPath(
+        (Join-Path $modelsRoot ($DraftModelFile -replace '/', [System.IO.Path]::DirectorySeparatorChar)))
+    if (-not (Test-Path $draftPath)) {
+        Write-Err "Draft model not found: $draftPath"
+        Write-Info "Place the draft model in .\models and pass the filename via -DraftModelFile"
+        exit 1
+    }
+    $SpeculativeFlags = "-md /models/$DraftModelFile -ngld $DraftGpuLayers --draft-max $DraftMax --draft-min $DraftMin"
+    Write-Info "Speculative: on (draft=$DraftModelFile, min=$DraftMin, max=$DraftMax, ngld=$DraftGpuLayers)"
+} else {
+    Write-Info "Speculative: off"
+}
 
 # Set environment for docker-compose
 $env:MODEL_FILE = $ModelFile
 $env:CONTEXT_SIZE = $Context.ToString()
 $env:REASONING = if ($Thinking) { "on" } else { "off" }
+$env:THREADS = $Threads.ToString()
+$env:BATCH_SIZE = $Batch.ToString()
+$env:UBATCH_SIZE = $UBatch.ToString()
+$env:SPECULATIVE_FLAGS = $SpeculativeFlags
+$env:EXTRA_LLAMA_FLAGS = $ExtraFlags
 
 # Restart if requested or already running
 if ($Restart) {
@@ -246,6 +339,9 @@ Write-Host "  Commands:" -ForegroundColor Cyan
 Write-Host "  .\run.ps1 -Stop           # Stop server" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model gemma312 # Gemma 3 12B (after -IncludeGemma312)" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model gemma426ba4b # Gemma 4 26B-A4B (after -IncludeGemma426BA4B)" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Batch 4096 -UBatch 1024 # auto threads" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Threads 24 -Batch 4096 -UBatch 1024" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -DraftModelFile <small-draft.gguf>" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Restart        # Restart server" -ForegroundColor Gray
 Write-Host "  docker compose logs -f    # Stream logs" -ForegroundColor Gray
 Write-Host ""

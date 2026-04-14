@@ -94,6 +94,38 @@ From another machine on the LAN:
 
 Use `-Runs 5` for a more stable average.
 
+### Step 6: A/B Performance Tuning (recommended)
+
+Run a controlled baseline, then compare tuned settings on the same model and prompt mix.
+
+```powershell
+# A: conservative batching (still uses auto thread count: e.g. 20 on a 32-logical Core i9)
+.\run.ps1 -Model 9b -Context 32768 -Threads 0 -Batch 2048 -UBatch 512 -Restart
+.\benchmark.ps1 -Runs 5
+
+# B: higher batch / micro-batch (often better on GPU; watch VRAM)
+.\run.ps1 -Model 9b -Context 32768 -Threads 0 -Batch 4096 -UBatch 1024 -Restart
+.\benchmark.ps1 -Runs 5
+
+# C: same as B but push CPU parallelism (try 16, 20, 24 on i9-13900K and pick the winner)
+.\run.ps1 -Model 9b -Context 32768 -Threads 24 -Batch 4096 -UBatch 1024 -Restart
+.\benchmark.ps1 -Runs 5
+```
+
+Optional speculative decoding test (requires a compatible draft GGUF in `models/`):
+
+```powershell
+.\run.ps1 -Model 9b -Context 32768 -Batch 4096 -UBatch 1024 -Threads 0 `
+  -DraftModelFile <draft-model.gguf> -DraftMin 4 -DraftMax 12 -Restart
+.\benchmark.ps1 -Runs 5
+```
+
+Notes:
+- Keep context fixed for fair A/B comparisons.
+- `-Threads 0` selects an auto thread count from your CPU (see **LLM tuning parameters** below).
+- Draft model should share tokenizer family with the main model.
+- If speculative decoding regresses speed, reduce `-DraftMax` or use a smaller draft model.
+
 ---
 
 ## Context Size: 32k vs 128k
@@ -241,15 +273,41 @@ Only one model is loaded at a time; switch with `.\run.ps1 -Model … -Restart`.
 ```powershell
 .\run.ps1 -Context 16384   # smaller context (saves VRAM)
 .\run.ps1 -Thinking       # extended reasoning mode
+.\run.ps1 -Batch 4096 -UBatch 1024        # throughput tuning (threads: default auto, or -Threads 24)
+.\run.ps1 -DraftModelFile <draft-model.gguf> -DraftMin 4 -DraftMax 12  # speculative decode
 .\run.ps1 -Stop           # stop stack
 ```
 
 ---
 
+## LLM tuning parameters (llama.cpp)
+
+These map to the `llm` service command in `docker-compose.yml`. `run.ps1` sets the env vars; you can also set them in a root `.env` file for `docker compose`.
+
+| Flag / setting | Env / `run.ps1` | What it does | Typical range to try |
+|----------------|-----------------|--------------|----------------------|
+| `-m` | `MODEL_FILE` | Main GGUF filename under `models/`. | Your downloaded models. |
+| `-c` | `CONTEXT_SIZE` / `-Context` | Max context length (token slots). Lower saves VRAM and speeds prefill. | 4096–131072 (keep at what you actually need). |
+| `-ctk` / `-ctv` | (fixed in compose) | KV cache tensor type for keys/values (`q4_0` here: smaller cache). | Other types per llama.cpp docs if you change the image flags. |
+| `-ngl` | (fixed `99`) | Layers offloaded to GPU for the main model. | `0`–`N` (99 = all layers on GPU when supported). |
+| `-t` | `THREADS` / `-Threads` | CPU threads for non-GPU work (tokenization, sampling, etc.). | **Auto:** `-Threads 0` → e.g. **20** on 32 logical CPUs (Core i9-13900K). Manually try **12–24**; above **24** rarely helps and can hurt. |
+| `-b` | `BATCH_SIZE` / `-Batch` | Physical batch size. | **512–8192**; **2048–4096** is a common sweep. |
+| `-ub` | `UBATCH_SIZE` / `-UBatch` | Micro-batch; must be **≤** `-b`. | **256–2048**; often **half** of `-b` (e.g. 2048/1024, 4096/1024). |
+| `--flash-attn` | (on) | Flash attention when the GPU/build supports it. | On unless debugging. |
+| `--reasoning` | `REASONING` / `-Thinking` | Extended reasoning mode if supported. | `on` / `off`. |
+| `--jinja` | (on) | Jinja chat templates (needed for Gemma and many instruct models). | Leave on for this stack. |
+| `--metrics` | (on) | Metrics endpoint for monitoring. | On. |
+| `-md`, `-ngld`, `--draft-min`, `--draft-max` | `-DraftModelFile`, `-DraftGpuLayers`, `-DraftMin`, `-DraftMax` | Speculative decoding: small draft model + verification on main model. | Draft **Q** smaller than main; **min** 2–8, **max** 8–32; **ngld** same idea as `-ngl`. |
+| (extra) | `EXTRA_LLAMA_FLAGS` / `-ExtraFlags` | Pass-through for other `llama-server` flags. | Per `llama-server --help` for your image version. |
+
+**Core i9-13900K (24P / 32 logical):** start with `-Threads 0` (auto → 20). In `.\benchmark.ps1`, compare **16**, **20**, **24** while holding `-Batch`/`-UBatch` fixed; keep the combo with best tok/s and stable latency.
+
+---
+
 ## Configuration
 
-- `docker-compose.yml` — LLM + usage-tracker services (llama.cpp uses `--jinja` for chat templates, important for Gemma)
-- `.env` — `MODEL_FILE`, `CONTEXT_SIZE`, `REASONING`, etc.
+- `docker-compose.yml` — LLM + usage-tracker services; comments above the `llm` service list llama.cpp flags and env vars
+- `.env` — `MODEL_FILE`, `CONTEXT_SIZE`, `REASONING`, optional `THREADS`, `BATCH_SIZE`, `UBATCH_SIZE`, `SPECULATIVE_FLAGS`, `EXTRA_LLAMA_FLAGS`
 - `.env.128k` — example env for 128k context
 - `benchmark.py` / `analyze-benchmark.py` — load tests and analysis
 - `run-benchmark.ps1` / `run-benchmark.sh` — benchmark helpers
