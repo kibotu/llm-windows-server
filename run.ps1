@@ -3,7 +3,7 @@
     Start or restart the LLM server via Docker.
 
 .PARAMETER Model
-    Which model to load: "9b" (default) or "35b"
+    Which model to load: "9b" (default), "35b", "gemma312" (Gemma 3 12B IT), or "gemma426ba4b" (Gemma 4 26B-A4B IT)
 
 .PARAMETER Restart
     Force restart the container
@@ -20,12 +20,14 @@
 .EXAMPLE
     .\run.ps1                  # Start with 9B model
     .\run.ps1 -Model 35b       # Start with 35B MoE model
+    .\run.ps1 -Model gemma312  # Gemma 3 12B IT (.\setup.ps1 -IncludeGemma312)
+    .\run.ps1 -Model gemma426ba4b # Gemma 4 26B-A4B IT (.\setup.ps1 -IncludeGemma426BA4B)
     .\run.ps1 -Restart         # Restart server
     .\run.ps1 -Stop            # Stop server
 #>
 
 param(
-    [ValidateSet("9b", "35b")]
+    [ValidateSet("9b", "35b", "gemma312", "gemma426ba4b")]
     [string]$Model = "9b",
 
     [switch]$Restart,
@@ -130,16 +132,30 @@ if ($Stop) {
     exit 0
 }
 
-# Select model file
+# Select model file (paths under models/ use forward slashes for the Linux container)
+$modelsDir = Join-Path $ScriptDir "models"
+if (-not (Test-Path $modelsDir)) {
+    Write-Err "Models directory not found: $modelsDir"
+    Write-Info "Run .\setup.ps1 first"
+    exit 1
+}
+$modelsRoot = (Resolve-Path $modelsDir).Path.TrimEnd('\')
 $ModelFile = if ($Model -eq "35b") {
     $f = Get-ChildItem "$ScriptDir\models" -Filter "*35B-A3B*" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($f) { $f.Name } else { "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf" }
+} elseif ($Model -eq "gemma312") {
+    $f = Get-ChildItem "$ScriptDir\models" -Filter "gemma-3-12b-it-Q4_K_M.gguf" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f) { $f.Name } else { "gemma-3-12b-it-Q4_K_M.gguf" }
+} elseif ($Model -eq "gemma426ba4b") {
+    $f = Get-ChildItem "$ScriptDir\models" -Filter "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f) { $f.Name } else { "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf" }
 } else {
     $f = Get-ChildItem "$ScriptDir\models" -Filter "*9B*Q4_K_M*" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($f) { $f.Name } else { "Qwen3.5-9B-Q4_K_M.gguf" }
 }
 
-$ModelPath = Join-Path "$ScriptDir\models" $ModelFile
+$ModelPath = [System.IO.Path]::GetFullPath(
+    (Join-Path $modelsRoot ($ModelFile -replace '/', [System.IO.Path]::DirectorySeparatorChar)))
 if (-not (Test-Path $ModelPath)) {
     Write-Err "Model not found: $ModelPath"
     Write-Info "Run .\setup.ps1 to download models"
@@ -159,14 +175,28 @@ $env:REASONING = if ($Thinking) { "on" } else { "off" }
 # Restart if requested or already running
 if ($Restart) {
     Write-Step "Restarting server"
-    docker compose -f "$ScriptDir\docker-compose.yml" down 2>&1 | Out-Null
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        docker compose -f "$ScriptDir\docker-compose.yml" down 2>&1 | Out-Null
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
 }
 
 # Start container
 Write-Step "Starting server"
-docker compose -f "$ScriptDir\docker-compose.yml" up -d 2>&1 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    $composeOutput = docker compose -f "$ScriptDir\docker-compose.yml" up -d 2>&1
+    $composeExit = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $prevEap
+}
+$composeOutput | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
 
-if ($LASTEXITCODE -ne 0) {
+if ($composeExit -ne 0) {
     Write-Err "Failed to start container"
     exit 1
 }
@@ -214,6 +244,8 @@ Write-Host "  export OPENAI_BASE_URL=http://${localIp}:8899/v1" -ForegroundColor
 Write-Host ""
 Write-Host "  Commands:" -ForegroundColor Cyan
 Write-Host "  .\run.ps1 -Stop           # Stop server" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model gemma312 # Gemma 3 12B (after -IncludeGemma312)" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model gemma426ba4b # Gemma 4 26B-A4B (after -IncludeGemma426BA4B)" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Restart        # Restart server" -ForegroundColor Gray
 Write-Host "  docker compose logs -f    # Stream logs" -ForegroundColor Gray
 Write-Host ""

@@ -51,13 +51,14 @@ try {
     exit 1
 }
 
-# Get model info
+# Get model id for chat requests (llama.cpp reports the loaded GGUF name)
+$benchModel = "local"
 try {
     $models = Invoke-RestMethod -Uri "$baseUrl/v1/models" -TimeoutSec 5
-    $modelId = $models.data[0].id
-    Write-Host "  Model: $modelId"
+    $benchModel = $models.data[0].id
+    Write-Host "  Model: $benchModel"
 } catch {
-    $modelId = "unknown"
+    Write-Host "  Model: (could not read /v1/models; using placeholder)" -ForegroundColor Yellow
 }
 
 Write-Host ""
@@ -92,7 +93,7 @@ foreach ($prompt in $prompts) {
         Write-Host "  Run $i/$Runs... " -NoNewline
         
         $body = @{
-            model = "qwen"
+            model = $benchModel
             messages = @(
                 @{ role = "system"; content = $prompt.system }
                 @{ role = "user"; content = $prompt.user }
@@ -156,7 +157,7 @@ for ($i = 1; $i -le $Runs; $i++) {
     Write-Host "  Run $i/$Runs... " -NoNewline
     
     $body = @{
-        model = "qwen"
+        model = $benchModel
         messages = @(
             @{ role = "user"; content = "Write a haiku about programming." }
         )

@@ -24,3 +24,5 @@ Desktop.ini
 .vscode/
 *.swp
 *.swo
+
+usage_data.json

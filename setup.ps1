@@ -6,9 +6,42 @@
 .DESCRIPTION
     Installs Docker Desktop, verifies GPU access, pulls the llama.cpp
     server image, downloads Qwen models, and configures firewall.
+
+.PARAMETER IncludeGemma312
+    Also download Gemma 3 12B IT Q4_K_M from unsloth/gemma-3-12b-it-GGUF (~7 GB, good for 16 GB VRAM).
+
+.PARAMETER IncludeGemma426BA4B
+    Also download Gemma 4 26B-A4B IT UD-Q4_K_M from unsloth/gemma-4-26B-A4B-it-GGUF (~16-17 GB).
+
+.PARAMETER Model
+    Optional. gemma312 / gemma426ba4b mirror the -Include* switches. Qwen models always download.
 #>
 
+param(
+    [switch]$IncludeGemma312,
+
+    [switch]$IncludeGemma426BA4B,
+
+    [string]$Model
+)
+
 $ErrorActionPreference = "Stop"
+
+# Map -Model to -Include* (same names as run.ps1)
+$downloadGemma312 = [bool]$IncludeGemma312
+$downloadGemma426BA4B = [bool]$IncludeGemma426BA4B
+if ($PSBoundParameters.ContainsKey("Model") -and -not [string]::IsNullOrWhiteSpace($Model)) {
+    $m = $Model.Trim()
+    if ($m -eq "gemma312") {
+        $downloadGemma312 = $true
+    } elseif ($m -eq "gemma426ba4b") {
+        $downloadGemma426BA4B = $true
+    } else {
+        Write-Err "setup.ps1 -Model only accepts 'gemma312' or 'gemma426ba4b'."
+        Write-Host "  To run the server: .\run.ps1 -Model 9b | 35b | gemma312 | gemma426ba4b" -ForegroundColor Yellow
+        exit 1
+    }
+}
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 # Ensure Docker is in PATH (for D: drive installation)
@@ -125,20 +158,30 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Step "Step 2: Verifying GPU access in Docker"
 
-Write-Host "  Testing NVIDIA GPU access..."
-$gpuTest = docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi 2>&1
-if ($LASTEXITCODE -ne 0) {
+Write-Host "  Testing NVIDIA GPU access (pulling nvidia/cuda test image if needed)..."
+# Docker writes pull progress to stderr; $ErrorActionPreference Stop would otherwise abort on that noise.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    $gpuTest = docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi 2>&1 | Out-String
+    $gpuExit = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $prevEap
+}
+if ($gpuExit -ne 0) {
     Write-Err "GPU access failed. Ensure:"
     Write-Host "  1. NVIDIA drivers are installed (run 'nvidia-smi' in PowerShell)"
     Write-Host "  2. Docker Desktop has WSL2 backend enabled"
     Write-Host "  3. Docker Desktop > Settings > Resources > WSL Integration is enabled"
+    Write-Host "  4. Try manually: docker pull nvidia/cuda:12.4.0-base-ubuntu22.04"
     Write-Host ""
     Write-Host "  Error: $gpuTest"
     exit 1
 }
 
-$gpuName = $gpuTest | Select-String "NVIDIA" | Select-Object -First 1
-Write-Ok "GPU accessible: $($gpuName.ToString().Trim())"
+$gpuName = $gpuTest -split "`n" | Select-String "NVIDIA" | Select-Object -First 1
+$gpuLine = if ($gpuName) { $gpuName.ToString().Trim() } else { "nvidia-smi exited 0" }
+Write-Ok "GPU accessible: $gpuLine"
 
 # ---------- Step 3: Pull Image ----------
 
@@ -200,11 +243,18 @@ print('DOWNLOAD_SUCCESS')
     $pyScriptFile = Join-Path $env:TEMP "hf_download.py"
     $pyScript | Out-File -FilePath $pyScriptFile -Encoding utf8
     
-    $result = & python $pyScriptFile 2>&1
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $result = & python $pyScriptFile 2>&1
+        $pyExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
     Remove-Item $pyScriptFile -Force -ErrorAction SilentlyContinue
     
     $resultText = $result | Out-String
-    if ($resultText -match "DOWNLOAD_SUCCESS") {
+    if ($pyExit -eq 0 -and $resultText -match "DOWNLOAD_SUCCESS") {
         $downloaded = Get-ChildItem $ModelsDir -Filter $Pattern -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($downloaded) {
             $sizeGB = [math]::Round($downloaded.Length / 1GB, 2)
@@ -213,13 +263,20 @@ print('DOWNLOAD_SUCCESS')
             Write-Err "$Name download completed but file not found"
         }
     } else {
-        Write-Host "  $result" -ForegroundColor Yellow
+        Write-Host "  $resultText" -ForegroundColor Yellow
         Write-Err "$Name download failed"
     }
 }
 
 Download-Model "unsloth/Qwen3.5-9B-GGUF" "*Q4_K_M*" "Qwen3.5-9B Q4_K_M"
 Download-Model "unsloth/Qwen3.5-35B-A3B-GGUF" "*Q4_K_XL*" "Qwen3.5-35B-A3B UD-Q4_K_XL"
+
+if ($downloadGemma312) {
+    Download-Model "unsloth/gemma-3-12b-it-GGUF" "gemma-3-12b-it-Q4_K_M.gguf" "Gemma 3 12B IT Q4_K_M"
+}
+if ($downloadGemma426BA4B) {
+    Download-Model "unsloth/gemma-4-26B-A4B-it-GGUF" "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf" "Gemma 4 26B-A4B IT UD-Q4_K_M"
+}
 
 # ---------- Step 5: Firewall ----------
 
@@ -253,11 +310,23 @@ Write-Host ""
 Write-Host "  Docker image:    ghcr.io/ggml-org/llama.cpp:server-cuda" -ForegroundColor White
 Write-Host "  Primary model:   Qwen3.5-9B Q4_K_M" -ForegroundColor White
 Write-Host "  Secondary model: Qwen3.5-35B-A3B UD-Q4_K_XL" -ForegroundColor White
+if ($downloadGemma312) {
+    Write-Host "  Optional model:  Gemma 3 12B IT Q4_K_M (16 GB VRAM friendly)" -ForegroundColor White
+}
+if ($downloadGemma426BA4B) {
+    Write-Host "  Optional model:  Gemma 4 26B-A4B IT UD-Q4_K_M (~16-17 GB)" -ForegroundColor White
+}
 Write-Host "  Server port:     $ServerPort" -ForegroundColor White
+Write-Host ""
+Write-Host "  ~16 GB VRAM (e.g. RTX 4080) - Unsloth single-file GGUF:" -ForegroundColor Cyan
+Write-Host "  .\setup.ps1 -IncludeGemma312  # or -Model gemma312  (~7 GB)" -ForegroundColor Gray
+Write-Host "  .\setup.ps1 -IncludeGemma426BA4B # or -Model gemma426ba4b (~16-17 GB)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Run the server:" -ForegroundColor Cyan
 Write-Host "  .\run.ps1                  # Start with 9B model" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model 35b       # Start with 35B MoE model" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model gemma312  # Gemma 3 12B IT" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model gemma426ba4b # Gemma 4 26B-A4B IT" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Restart         # Restart server" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Stop            # Stop server" -ForegroundColor Gray
 Write-Host ""
