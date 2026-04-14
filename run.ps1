@@ -60,16 +60,16 @@ param(
 
     [switch]$Restart,
 
-    [int]$Context = 32768,
+    [int]$Context = 131072, # 32768
 
     [switch]$Thinking,
 
     [ValidateRange(0, 256)]
     [int]$Threads = 0,
 
-    [int]$Batch = 2048,
+    [int]$Batch = 4096,
 
-    [int]$UBatch = 512,
+    [int]$UBatch = 1024,
 
     [string]$DraftModelFile = "",
 
