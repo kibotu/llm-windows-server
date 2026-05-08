@@ -1,15 +1,16 @@
 # LLM service: llama.cpp HTTP server (CUDA). Tuning reference:
 #   -m MODEL_FILE     Main GGUF path inside container (/models/...).
 #   -c            CONTEXT_SIZE   Max context slots (tokens). Lower = less VRAM, faster prefill.
-#   -ctk / -ctv   KV cache type for K/V tensors (q4_0 here: smaller KV, slight quality/speed tradeoff).
+#   -ctk / -ctv   KV cache type for K/V tensors. Options: q4_0 (smallest), q8_0 (balanced), f16 (best).
 #   -ngl          GPU layers for main model (99 = all layers on GPU when supported).
 #   -t            THREADS        CPU threads (prompt processing, sampling, ops not on GPU). See README.
-#   -b            BATCH_SIZE     Physical batch; larger can raise throughput, uses more VRAM.
-#   -ub           UBATCH_SIZE    Micro-batch; must be <= -b; often b/4–b/2.
+#   -b            BATCH_SIZE     Physical batch; larger improves throughput esp. with CPU expert offload.
+#   -ub           UBATCH_SIZE    Micro-batch; must be <= -b. For MoE: set equal to -b (e.g. 4096).
 #   --flash-attn  Flash attention (faster attention on supported GPUs).
 #   --reasoning   REASONING      Extended reasoning mode when model/server supports it (on/off).
 #   --jinja       Chat templates via Jinja (needed for Gemma and many instruct models).
 #   --metrics     Expose Prometheus-style metrics endpoint.
+#   MOE_FLAGS (MoE models): --cpu-moe (offload all experts to CPU) or --n-cpu-moe N (first N layers).
 #   SPECULATIVE_FLAGS (optional): draft model -md, -ngld, --draft-min, --draft-max (see README).
 #   EXTRA_LLAMA_FLAGS (optional): pass-through for advanced llama-server flags.
 # Env vars are set by run.ps1 or a root .env file; defaults below apply if unset.
@@ -39,8 +40,8 @@ services:
     command: >-
       -m /models/${MODEL_FILE:-Qwen3.5-9B-Q4_K_M.gguf}
       -c ${CONTEXT_SIZE:-32768}
-      -ctk q4_0
-      -ctv q4_0
+      -ctk ${KV_CACHE_TYPE:-q8_0}
+      -ctv ${KV_CACHE_TYPE:-q8_0}
       -ngl 99
       -t ${THREADS:-20}
       -b ${BATCH_SIZE:-2048}
@@ -51,6 +52,7 @@ services:
       --reasoning ${REASONING:-off}
       --jinja
       --metrics
+      ${MOE_FLAGS:-}
       ${SPECULATIVE_FLAGS:-}
       ${EXTRA_LLAMA_FLAGS:-}
 
@@ -59,6 +61,8 @@ services:
     container_name: usage-tracker
     ports:
       - "8899:8899"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./usage_data.json:/data/usage_data.json:rw
     depends_on:

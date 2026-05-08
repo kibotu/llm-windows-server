@@ -252,14 +252,17 @@ tailscale ip -4
 
 ## Model Selection
 
-| Model | Size | Speed | When to Use |
-|-------|------|-------|-------------|
-| Qwen3.5-9B | ~5 GB | fast | Default: agentic loops, edits, chat |
-| Qwen3.5-35B-A3B | ~21 GB | slower | Harder reasoning; tight on 16 GB VRAM |
-| Gemma 3 12B IT Q4_K_M | ~7 GB | medium | Strong general + IT model; fits 16 GB VRAM with context headroom |
-| Gemma 4 26B-A4B IT UD-Q4_K_M | ~16-17 GB | medium | Gemma 4 Q4 option; significantly heavier than 9B/12B class models |
+| Model | Size | Speed | VRAM (full) | VRAM (MoE offload) | When to Use |
+|-------|------|-------|-------------|-------------------|-------------|
+| Qwen3.5-9B | ~5 GB | fast | ~8 GB | N/A (dense) | Default: agentic loops, edits, chat |
+| Qwen3.6-35B-A3B | ~21 GB | medium | ~20 GB | **~6-8 GB** | Complex reasoning; with `-MoeOffload auto` fits 8-12 GB cards |
+| Qwen3.6-35B-A3B 2-bit | ~12 GB | medium | ~12 GB | **~4-5 GB** | Ultra-low VRAM; use `-Model qwen3635ba3b2bit` |
+| Gemma 3 12B IT Q4_K_M | ~7 GB | medium | ~9 GB | N/A (dense) | Strong general + IT model; fits 12-16 GB VRAM |
+| Gemma 4 26B-A4B IT | ~16 GB | medium | ~18 GB | **~8-10 GB** | Gemma 4 MoE; with `-MoeOffload auto` fits 12 GB cards |
 
 Only one model is loaded at a time; switch with `.\run.ps1 -Model … -Restart`.
+
+**MoE models** (Qwen 35B, Gemma 4 26B-A4B) automatically enable expert offloading (`-MoeOffload auto`) which dramatically reduces VRAM requirements. See [MoE Expert Offloading](#moe-expert-offloading-for-large-moe-models) for details.
 
 ```powershell
 .\run.ps1 -Model 35b -Restart
@@ -278,6 +281,89 @@ Only one model is loaded at a time; switch with `.\run.ps1 -Model … -Restart`.
 .\run.ps1 -Stop           # stop stack
 ```
 
+### Host Control API (model switching + loading feedback)
+
+You can run a lightweight host-side API to switch models remotely. It executes `run.ps1` on Windows and streams progress as Server-Sent Events (SSE), which works as a loading indicator in UIs.
+
+Start it in a separate terminal:
+
+```powershell
+.\start-control.ps1
+```
+
+Default endpoint: `http://localhost:8898`
+
+- `GET /models` - available model aliases + last switch state
+- `GET /status` - current switch status + health checks
+- `POST /switch` - runs `run.ps1` with your requested flags and streams status/output
+
+Examples:
+
+```powershell
+# Equivalent to: .\run.ps1 -Thinking
+Invoke-WebRequest -Uri "http://localhost:8898/switch" -Method POST -ContentType "application/json" -Body '{"thinking": true}'
+
+# Equivalent to: .\run.ps1 -Thinking -Model 35b -Restart
+Invoke-WebRequest -Uri "http://localhost:8898/switch" `
+  -Method POST `
+  -ContentType "application/json" `
+  -Body '{"model":"35b","thinking":true,"restart":true}'
+```
+
+SSE client behavior:
+- read `event: status` for coarse phases (`starting`, `waiting`, `ready`)
+- read `event: output` for log lines to render a spinner/progress log
+- stop loading on `event: done` and check `success`
+
+---
+
+## MoE Expert Offloading (for large MoE models)
+
+Mixture-of-Experts (MoE) models like **Qwen 3.6 35B-A3B** and **Gemma 4 26B-A4B** have a special architecture: they contain many "expert" sub-networks but only activate a few per forward pass. This makes them ideal for **CPU expert offloading** — keeping the always-active attention layers on GPU while offloading the large expert FFN tensors to CPU/RAM.
+
+### Why It Helps
+
+- **Dramatically reduces VRAM** — A 35B MoE model might only need ~6-8 GB VRAM instead of 20+ GB
+- **Modest performance impact** — Since only ~3B params are active per token, CPU expert execution is fast
+- **Enables larger models on consumer GPUs** — Run Qwen 3.6 35B on a single RTX 3060/4060
+
+### Usage
+
+```powershell
+# Auto-enable expert offloading for MoE models (default behavior)
+.\run.ps1 -Model qwen3635ba3b -MoeOffload auto
+
+# Offload ALL experts to CPU (lowest VRAM, good for 8-12 GB cards)
+.\run.ps1 -Model qwen3635ba3b -MoeOffload all
+
+# Offload first N layers' experts (fine-tuning for your VRAM)
+.\run.ps1 -Model qwen3635ba3b -MoeOffload 30
+
+# Disable offloading (requires full VRAM — 20+ GB for 35B model)
+.\run.ps1 -Model qwen3635ba3b -MoeOffload off
+
+# 2-bit quant with CPU experts (ultra-low VRAM)
+.\run.ps1 -Model qwen3635ba3b2bit -MoeOffload auto
+```
+
+### MoE-Specific Tuning
+
+For MoE models with CPU expert offloading:
+
+| Setting | Recommendation | Why |
+|---------|----------------|-----|
+| `-Batch` / `-UBatch` | **4096/4096** | Higher batch improves GPU offload prompt processing. Auto-set when MoE offload is enabled. |
+| `-KvCache` | **q8_0** (default) | Better quality than q4_0 with minimal VRAM impact. |
+| `-Threads` | **16–24** | CPU handles expert FFN computation; more threads help. |
+
+### VRAM Estimates (Qwen 3.6 35B-A3B Q4_K)
+
+| Offload Mode | Approx VRAM | Context | Notes |
+|--------------|-------------|---------|-------|
+| `off` | ~20 GB | 32k | Full GPU — needs RTX 3090/4090 |
+| `all` / `auto` | ~6-8 GB | 32k | Attention on GPU, experts on CPU |
+| `all` + `q4_0` KV | ~5-6 GB | 32k | Minimal VRAM; fits RTX 3060/4060 |
+
 ---
 
 ## LLM tuning parameters (llama.cpp)
@@ -288,11 +374,13 @@ These map to the `llm` service command in `docker-compose.yml`. `run.ps1` sets t
 |----------------|-----------------|--------------|----------------------|
 | `-m` | `MODEL_FILE` | Main GGUF filename under `models/`. | Your downloaded models. |
 | `-c` | `CONTEXT_SIZE` / `-Context` | Max context length (token slots). Lower saves VRAM and speeds prefill. | 4096–131072 (keep at what you actually need). |
-| `-ctk` / `-ctv` | (fixed in compose) | KV cache tensor type for keys/values (`q4_0` here: smaller cache). | Other types per llama.cpp docs if you change the image flags. |
+| `-ctk` / `-ctv` | `KV_CACHE_TYPE` / `-KvCache` | KV cache tensor type for keys/values. | `q4_0` (smallest), `q8_0` (balanced, default), `f16` (best quality). |
 | `-ngl` | (fixed `99`) | Layers offloaded to GPU for the main model. | `0`–`N` (99 = all layers on GPU when supported). |
-| `-t` | `THREADS` / `-Threads` | CPU threads for non-GPU work (tokenization, sampling, etc.). | **Auto:** `-Threads 0` → e.g. **20** on 32 logical CPUs (Core i9-13900K). Manually try **12–24**; above **24** rarely helps and can hurt. |
-| `-b` | `BATCH_SIZE` / `-Batch` | Physical batch size. | **512–8192**; **2048–4096** is a common sweep. |
-| `-ub` | `UBATCH_SIZE` / `-UBatch` | Micro-batch; must be **≤** `-b`. | **256–2048**; often **half** of `-b` (e.g. 2048/1024, 4096/1024). |
+| `--cpu-moe` | `MOE_FLAGS` / `-MoeOffload auto/all` | Offload all MoE expert FFN to CPU (MoE models only). | Enable for MoE on <16 GB VRAM. |
+| `--n-cpu-moe N` | `MOE_FLAGS` / `-MoeOffload N` | Offload first N layers' experts to CPU. | Fine-tune for your VRAM. |
+| `-t` | `THREADS` / `-Threads` | CPU threads for non-GPU work (tokenization, sampling, expert computation). | **Auto:** `-Threads 0` → e.g. **20** on 32 logical CPUs. Manually try **16–24** (especially important with MoE offloading). |
+| `-b` | `BATCH_SIZE` / `-Batch` | Physical batch size. | **512–8192**; **4096** recommended for MoE with CPU offload. |
+| `-ub` | `UBATCH_SIZE` / `-UBatch` | Micro-batch; must be **≤** `-b`. | **4096** (equal to `-b`) for MoE; otherwise half of `-b`. |
 | `--flash-attn` | (on) | Flash attention when the GPU/build supports it. | On unless debugging. |
 | `--reasoning` | `REASONING` / `-Thinking` | Extended reasoning mode if supported. | `on` / `off`. |
 | `--jinja` | (on) | Jinja chat templates (needed for Gemma and many instruct models). | Leave on for this stack. |
@@ -307,7 +395,7 @@ These map to the `llm` service command in `docker-compose.yml`. `run.ps1` sets t
 ## Configuration
 
 - `docker-compose.yml` — LLM + usage-tracker services; comments above the `llm` service list llama.cpp flags and env vars
-- `.env` — `MODEL_FILE`, `CONTEXT_SIZE`, `REASONING`, optional `THREADS`, `BATCH_SIZE`, `UBATCH_SIZE`, `SPECULATIVE_FLAGS`, `EXTRA_LLAMA_FLAGS`
+- `.env` — `MODEL_FILE`, `CONTEXT_SIZE`, `REASONING`, `KV_CACHE_TYPE`, `MOE_FLAGS`, optional `THREADS`, `BATCH_SIZE`, `UBATCH_SIZE`, `SPECULATIVE_FLAGS`, `EXTRA_LLAMA_FLAGS`
 - `.env.128k` — example env for 128k context
 - `benchmark.py` / `analyze-benchmark.py` — load tests and analysis
 - `run-benchmark.ps1` / `run-benchmark.sh` — benchmark helpers
@@ -333,6 +421,8 @@ docker-compose.yml    Services (llm + usage-tracker)
 Dockerfile            usage-tracker image
 setup.ps1             One-time setup
 run.ps1               Start / stop / restart server
+start-control.ps1     Start host control API (port 8898)
+model_switcher.py     Host API for model switches + SSE progress
 test.ps1              Connectivity test
 benchmark.ps1         Quick tokens/sec check
 benchmark.py          Python benchmark suite
