@@ -1,28 +1,94 @@
-# LLM service: llama.cpp HTTP server (CUDA). Tuning reference:
-#   -m MODEL_FILE     Main GGUF path inside container (/models/...).
-#   -c            CONTEXT_SIZE   Max context slots (tokens). Lower = less VRAM, faster prefill.
-#   -ctk / -ctv   KV cache type for K/V tensors. Options: q4_0 (smallest), q8_0 (balanced), f16 (best).
-#   -ngl          GPU layers for main model (99 = all layers on GPU when supported).
-#   -t            THREADS        CPU threads (prompt processing, sampling, ops not on GPU). See README.
-#   -b            BATCH_SIZE     Physical batch; larger improves throughput esp. with CPU expert offload.
-#   -ub           UBATCH_SIZE    Micro-batch; must be <= -b. For MoE: set equal to -b (e.g. 4096).
-#   --flash-attn  Flash attention (faster attention on supported GPUs).
-#   --reasoning   REASONING      Extended reasoning mode when model/server supports it (on/off).
-#   --jinja       Chat templates via Jinja (needed for Gemma and many instruct models).
-#   --metrics     Expose Prometheus-style metrics endpoint.
-#   MOE_FLAGS (MoE models): --cpu-moe (offload all experts to CPU) or --n-cpu-moe N (first N layers).
-#   SPECULATIVE_FLAGS (optional): draft model -md, -ngld, --draft-min, --draft-max (see README).
-#   EXTRA_LLAMA_FLAGS (optional): pass-through for advanced llama-server flags.
-# Env vars are set by run.ps1 or a root .env file; defaults below apply if unset.
+# =============================================================================
+# llama.cpp LLM Server — Optimized for:
+#   GPU:  NVIDIA RTX 4080 16 GB VRAM
+#   RAM:  96 GB DDR5 (used for MoE expert offload)
+#   OS:   Windows 11 + Docker Desktop (WSL2 backend)
+#   Model: Qwen3.6-35B-A3B (MoE, ~19–20 GB total weights at IQ4_XS)
+#
+# VRAM BUDGET (approximate at IQ4_XS):
+#   Model weights on GPU (attn + shared expert) : ~13–14 GB
+#   Routed expert weights                        : offloaded to DDR5 RAM
+#   KV cache (q8_0, 16k ctx × 4 slots)          : ~1.5 GB
+#   CUDA overhead + buffers                      : ~0.5 GB
+#   Total GPU                                    : ~15–15.5 GB  (safe on 16 GB)
+#   RAM used for expert offload                  : ~6–7 GB      (trivial on 96 GB)
+#
+# TUNING REFERENCE:
+#   -ngl 999            All non-expert layers to GPU (attention, shared FFN)
+#   --cpu-moe           Routed expert weights live in RAM, streamed over PCIe
+#                       → keeps 16 GB VRAM from blowing up while retaining
+#                         GPU-speed attention / prefill
+#   -c                  Total KV context = per_slot_ctx × n_parallel
+#                       Set to 65536 (16k per slot × 4 slots). Raise to
+#                       131072 if you only use 1–2 concurrent sessions and
+#                       want long context. Lower to 32768 to save ~0.7 GB VRAM.
+#   --parallel 4        4 concurrent request slots. Each gets 16k context.
+#                       Raise to 8 if you have many concurrent callers;
+#                       lower to 1 for max single-session context.
+#   --cont-batching     Essential: without this only ONE request runs at a time
+#                       even with multiple parallel slots.
+#   -b 2048             Physical batch — higher = faster prefill (prompt ingestion)
+#   -ub 2048            Micro-batch MUST equal -b for MoE models (not 512)
+#                       MoE throughput is highly sensitive to this.
+#   -ctk / -ctv q8_0   KV cache at 8-bit halves VRAM vs f16 with minimal quality
+#                       loss. Use q4_0 if you hit VRAM limits at long context.
+#   -t 8                CPU threads for expert compute + sampling. On Windows/WSL2
+#                       do NOT set this to your full core count — leave headroom
+#                       for the OS and Docker overhead. Adjust to your CPU core
+#                       count; 8 is a safe default for most 12–16 core CPUs.
+#   --flash-attn on     Free ~30% VRAM reduction on attention + faster on Ada GPU
+#   --no-mmap           Disable memory-mapped I/O. Slower cold load but prevents
+#                       Windows page-cache eviction from stalling inference.
+#                       Remove if model load time is unacceptable.
+#   --numa distribute   Helps on multi-NUMA systems; harmless on single-socket.
+#
+# ENV VARS (override in a .env file next to this compose file):
+#   MODEL_FILE          GGUF filename inside ./models/ (default: Qwen3.6 IQ4_XS)
+#   CONTEXT_SIZE        Total KV context tokens (default: 65536)
+#   N_PARALLEL          Concurrent slots (default: 4)
+#   KV_CACHE_TYPE       q8_0 (default) | q4_0 (aggressive VRAM saving)
+#   THREADS             CPU threads for expert/sample ops (default: 8)
+#   BATCH_SIZE          Physical batch, must equal UBATCH_SIZE for MoE (default: 2048)
+#   REASONING           on | off — Qwen3 extended thinking mode (default: off)
+#   EXTRA_LLAMA_FLAGS   Pass-through for any additional llama-server flags
+# =============================================================================
+
 services:
+
+  # ---------------------------------------------------------------------------
+  # llm — llama.cpp HTTP server (CUDA + CPU-MoE hybrid)
+  # ---------------------------------------------------------------------------
   llm:
+    # Pin to a specific release tag rather than floating :server-cuda.
+    # Check https://github.com/ggml-org/llama.cpp/releases for latest stable.
+    # Example: image: ghcr.io/ggml-org/llama.cpp:server-cuda-b5300
+    # Using latest tag here for ease — swap to a pinned tag for production.
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
+
     container_name: llm-server
+
     expose:
       - "8888"
+
     volumes:
-      - ./models:/models:ro
-      - ./logs:/logs
+      - ./models:/models:ro    # model files (read-only)
+      - ./logs:/logs            # server logs
+
+    # Required for CUDA IPC and large GPU allocations on Windows/WSL2.
+    # shm_size prevents "CUDA out of shared memory" errors during batched inference.
+    shm_size: '2g'
+    ipc: host
+
+    # Prevent the OS from swapping model weights or KV cache to disk.
+    # Critical on Windows where page-file pressure can cause stalls mid-inference.
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
+
     deploy:
       resources:
         reservations:
@@ -30,49 +96,81 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
     restart: unless-stopped
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 120s
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # Qwen3.6-35B IQ4_XS is ~19 GB on disk. Cold load over a slow NVMe +
+      # CUDA kernel compilation can take 3–5 min on first start. 300s is safe.
+      start_period: 300s
+
     command: >-
-      -m /models/${MODEL_FILE:-Qwen3.5-9B-Q4_K_M.gguf}
-      -c ${CONTEXT_SIZE:-32768}
+      -m /models/${MODEL_FILE:-Qwen3.6-35B-A3B-UD-IQ4_XS.gguf}
+
+      -c ${CONTEXT_SIZE:-65536}
+
       -ctk ${KV_CACHE_TYPE:-q8_0}
       -ctv ${KV_CACHE_TYPE:-q8_0}
-      -ngl 99
-      -t ${THREADS:-20}
+
+      -ngl 999
+
+      -t ${THREADS:-8}
+
       -b ${BATCH_SIZE:-2048}
-      -ub ${UBATCH_SIZE:-512}
+      -ub ${BATCH_SIZE:-2048}
+
       --host 0.0.0.0
       --port 8888
+
       --flash-attn on
+
+      --parallel ${N_PARALLEL:-4}
+      --cont-batching
+
       --reasoning ${REASONING:-off}
       --jinja
       --metrics
-      ${MOE_FLAGS:-}
-      ${SPECULATIVE_FLAGS:-}
+
+      --cpu-moe
+
+      --no-mmap
+
+      --numa distribute
+
       ${EXTRA_LLAMA_FLAGS:-}
 
+  # ---------------------------------------------------------------------------
+  # usage-tracker — lightweight token usage accounting proxy
+  # ---------------------------------------------------------------------------
   usage-tracker:
     build: .
     container_name: usage-tracker
+
     ports:
       - "8899:8899"
+
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
     volumes:
       - ./usage_data.json:/data/usage_data.json:rw
+
     depends_on:
       llm:
         condition: service_healthy
+
     environment:
       - LLAMA_SERVER_URL=http://llm:8888
+
     restart: unless-stopped
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8899/usage"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
