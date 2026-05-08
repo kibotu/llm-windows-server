@@ -3,7 +3,7 @@
     Start or restart the LLM server via Docker.
 
 .PARAMETER Model
-    Which model to load: "9b" (default), "35b", "gemma312" (Gemma 3 12B IT), or "gemma426ba4b" (Gemma 4 26B-A4B IT)
+    Which model to load: "9b" (default), "35b", "qwen3635ba3b" (Qwen 3.6 35B-A3B), "gemma312" (Gemma 3 12B IT), or "gemma426ba4b" (Gemma 4 26B-A4B IT)
 
 .PARAMETER Restart
     Force restart the container
@@ -36,6 +36,22 @@
 .PARAMETER DraftGpuLayers
     -ngld: GPU layers for the draft model (0 = CPU draft, 99 = all on GPU when supported).
 
+.PARAMETER MoeOffload
+    MoE expert offloading strategy for large MoE models (Qwen 35B, Gemma 4 26B-A4B, etc.):
+    - "auto" (default): Enable expert offloading for MoE models, disable for dense models
+    - "off": Disable offloading (requires full VRAM for model)
+    - "all": Offload ALL experts to CPU (minimal VRAM usage, slower token gen)
+    - N (number): Offload experts from first N layers to CPU (fine-tuning)
+    
+    This keeps attention layers on GPU for speed while offloading routed expert FFN to CPU.
+    Dramatically reduces VRAM requirements for MoE models with modest performance impact.
+
+.PARAMETER KvCache
+    KV cache quantization type (default: q8_0):
+    - "q4_0": Smallest, fastest, slight quality loss
+    - "q8_0": Good balance of quality and size (recommended for MoE)
+    - "f16": Best quality, uses more VRAM
+
 .PARAMETER ExtraFlags
     Appended verbatim to the llama-server command (advanced; see llama.cpp server --help).
 
@@ -44,30 +60,42 @@
 
 .EXAMPLE
     .\run.ps1                  # Start with 9B model
-    .\run.ps1 -Model 35b       # Start with 35B MoE model
+    .\run.ps1 -Model 35b       # Start with 35B MoE model (prefers Qwen3.6 if present)
+    .\run.ps1 -Model qwen3635ba3b # Start with Qwen3.6-35B-A3B
+    .\run.ps1 -Model qwen3635ba3b2bit # Start with Qwen3.6-35B-A3B-UD-Q2_K_XL (2-bit, CPU experts)
     .\run.ps1 -Model gemma312  # Gemma 3 12B IT (.\setup.ps1 -IncludeGemma312)
     .\run.ps1 -Model gemma426ba4b # Gemma 4 26B-A4B IT (.\setup.ps1 -IncludeGemma426BA4B)
-    .\run.ps1 -Batch 4096 -UBatch 1024              # uses auto thread count
-    .\run.ps1 -Threads 24 -Batch 4096 -UBatch 1024  # many-core CPU (benchmark vs auto)
+    
+    # MoE Expert Offloading (for 35B and larger MoE models with limited VRAM):
+    .\run.ps1 -Model qwen3635ba3b2bit -MoeOffload auto  # Auto-detect: offload experts to CPU
+    .\run.ps1 -Model qwen3635ba3b -MoeOffload all       # Offload ALL experts to CPU (lowest VRAM)
+    .\run.ps1 -Model qwen3635ba3b -MoeOffload 30        # Offload first 30 layers' experts to CPU
+    .\run.ps1 -Model qwen3635ba3b -MoeOffload off       # No offloading (needs ~20GB+ VRAM)
+    
+    # Performance tuning:
+    .\run.ps1 -Batch 4096 -UBatch 4096              # Higher batch for MoE (better PP speed)
+    .\run.ps1 -Threads 24 -Batch 4096 -UBatch 2048  # Many-core CPU (benchmark vs auto)
+    .\run.ps1 -KvCache q8_0                         # Better quality KV cache (default)
+    .\run.ps1 -KvCache q4_0                         # Smaller KV cache (save VRAM)
     .\run.ps1 -DraftModelFile Qwen3-1.7B-Q4_K_M.gguf -DraftMax 12 -DraftMin 4
     .\run.ps1 -Restart         # Restart server
     .\run.ps1 -Stop            # Stop server
 #>
 
 param(
-    [ValidateSet("9b", "35b", "gemma312", "gemma426ba4b")]
+    [ValidateSet("9b", "35b", "qwen3635ba3b", "gemma312", "gemma426ba4b", "qwen3635ba3b2bit")]
     [string]$Model = "9b",
 
     [switch]$Restart,
 
-    [int]$Context = 131072, # 32768
+    [int]$Context = 262144, # 131072, # 32768
 
     [switch]$Thinking,
 
     [ValidateRange(0, 256)]
     [int]$Threads = 0,
 
-    [int]$Batch = 4096,
+    [int]$Batch = 2048,
 
     [int]$UBatch = 1024,
 
@@ -78,6 +106,18 @@ param(
     [int]$DraftMax = 16,
 
     [int]$DraftGpuLayers = 99,
+
+    # MoE Expert Offloading: offload routed experts to CPU for large MoE models
+    # "auto" = enable for MoE models (35b, qwen3635ba3b, qwen3635ba3b2bit, gemma426ba4b)
+    # "off"  = disable (full GPU, needs enough VRAM)
+    # "all"  = offload ALL experts to CPU (minimal VRAM, slower)
+    # N      = offload experts from first N layers to CPU (fine-tuning)
+    [ValidatePattern("^(auto|off|all|\d+)$")]
+    [string]$MoeOffload = "auto",
+
+    # KV cache quantization: q4_0 (smaller, faster), q8_0 (better quality), f16 (best quality)
+    [ValidateSet("q4_0", "q8_0", "f16")]
+    [string]$KvCache = "q8_0",
 
     [string]$ExtraFlags = "",
 
@@ -204,8 +244,19 @@ if (-not (Test-Path $modelsDir)) {
 }
 $modelsRoot = (Resolve-Path $modelsDir).Path.TrimEnd('\')
 $ModelFile = if ($Model -eq "35b") {
-    $f = Get-ChildItem "$ScriptDir\models" -Filter "*35B-A3B*" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($f) { $f.Name } else { "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf" }
+    $f36 = Get-ChildItem "$ScriptDir\models" -Filter "*Qwen3.6-35B-A3B*Q4_K_S*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f36) {
+        $f36.Name
+    } else {
+        $f35 = Get-ChildItem "$ScriptDir\models" -Filter "*Qwen3.5-35B-A3B*Q4_K_XL*" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($f35) { $f35.Name } else { "Qwen3.6-35B-A3B-UD-Q4_K_S.gguf" }
+    }
+} elseif ($Model -eq "qwen3635ba3b") {
+    $f = Get-ChildItem "$ScriptDir\models" -Filter "*Qwen3.6-35B-A3B*Q4_K_S*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f) { $f.Name } else { "Qwen3.6-35B-A3B-UD-Q4_K_S.gguf" }
+} elseif ($Model -eq "qwen3635ba3b2bit") {
+    $f = Get-ChildItem "$ScriptDir\models" -Filter "*Qwen3.6-35B-A3B-UD-Q2_K_XL*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f) { $f.Name } else { "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf" }
 } elseif ($Model -eq "gemma312") {
     $f = Get-ChildItem "$ScriptDir\models" -Filter "gemma-3-12b-it-Q4_K_M.gguf" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($f) { $f.Name } else { "gemma-3-12b-it-Q4_K_M.gguf" }
@@ -226,6 +277,42 @@ if (-not (Test-Path $ModelPath)) {
 }
 
 $ModelSize = [math]::Round((Get-Item $ModelPath).Length / 1GB, 2)
+
+# Determine if this is an MoE model that benefits from expert offloading
+$IsMoeModel = $Model -in @("35b", "qwen3635ba3b", "qwen3635ba3b2bit", "gemma426ba4b")
+$MoeFlags = ""
+
+if ($IsMoeModel) {
+    # For MoE models, use higher batch sizes by default for better prompt processing
+    # (GPU offload prompt processing threshold is 32 tokens minimum)
+    if ($Batch -lt 4096 -and $MoeOffload -ne "off") {
+        $Batch = 4096
+        $UBatch = 4096
+    }
+    
+    switch ($MoeOffload) {
+        "auto" {
+            # Auto mode: offload all experts to CPU, keep attention on GPU
+            # This is the best balance for single-GPU setups with limited VRAM
+            $MoeFlags = "--cpu-moe"
+        }
+        "all" {
+            # Explicit all: same as auto, offload ALL experts to CPU
+            $MoeFlags = "--cpu-moe"
+        }
+        "off" {
+            # No offloading - requires enough VRAM for full model + KV cache
+            $MoeFlags = ""
+        }
+        default {
+            # Numeric value: offload first N layers' experts to CPU
+            if ($MoeOffload -match '^\d+$') {
+                $MoeFlags = "--n-cpu-moe $MoeOffload"
+            }
+        }
+    }
+}
+
 Write-Info "Model: $ModelFile ($ModelSize GB)"
 Write-Info "Context: $Context tokens"
 Write-Info "Reasoning: $(if ($Thinking) { 'on' } else { 'off' })"
@@ -235,6 +322,17 @@ if ($ThreadsFromAuto) {
     Write-Info "Threads: $Threads (manual)"
 }
 Write-Info "Batch/UBatch: $Batch/$UBatch"
+Write-Info "KV Cache: $KvCache"
+
+if ($IsMoeModel) {
+    if ($MoeFlags -ne "") {
+        Write-Info "MoE Offload: $MoeOffload (experts -> CPU, attention -> GPU)"
+    } else {
+        Write-Info "MoE Offload: off (full GPU)"
+    }
+} else {
+    Write-Info "MoE Offload: N/A (dense model)"
+}
 
 if ($Batch -lt $UBatch) {
     Write-Warn "Batch ($Batch) is smaller than UBatch ($UBatch). This usually hurts throughput."
@@ -263,6 +361,8 @@ $env:THREADS = $Threads.ToString()
 $env:BATCH_SIZE = $Batch.ToString()
 $env:UBATCH_SIZE = $UBatch.ToString()
 $env:SPECULATIVE_FLAGS = $SpeculativeFlags
+$env:MOE_FLAGS = $MoeFlags
+$env:KV_CACHE_TYPE = $KvCache
 $env:EXTRA_LLAMA_FLAGS = $ExtraFlags
 
 # Restart if requested or already running
@@ -337,10 +437,14 @@ Write-Host "  export OPENAI_BASE_URL=http://${localIp}:8899/v1" -ForegroundColor
 Write-Host ""
 Write-Host "  Commands:" -ForegroundColor Cyan
 Write-Host "  .\run.ps1 -Stop           # Stop server" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model qwen3635ba3b # Qwen 3.6 35B-A3B" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model qwen3635ba3b2bit -MoeOffload auto # 2-bit + CPU experts" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model gemma312 # Gemma 3 12B (after -IncludeGemma312)" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model gemma426ba4b # Gemma 4 26B-A4B (after -IncludeGemma426BA4B)" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Batch 4096 -UBatch 1024 # auto threads" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Threads 24 -Batch 4096 -UBatch 1024" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -MoeOffload all # Offload ALL experts to CPU (lowest VRAM)" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -MoeOffload 30  # Offload first 30 layers' experts" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -KvCache q4_0   # Smaller KV cache (save VRAM)" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Batch 4096 -UBatch 4096 # Higher batch for MoE" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -DraftModelFile <small-draft.gguf>" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Restart        # Restart server" -ForegroundColor Gray
 Write-Host "  docker compose logs -f    # Stream logs" -ForegroundColor Gray

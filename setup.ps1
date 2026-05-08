@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Installs Docker Desktop, verifies GPU access, pulls the llama.cpp
-    server image, downloads Qwen models, and configures firewall.
+    server image, downloads Qwen models (including Qwen3.6-35B-A3B and an uncensored Qwen3 8B variant), and configures firewall.
 
 .PARAMETER IncludeGemma312
     Also download Gemma 3 12B IT Q4_K_M from unsloth/gemma-3-12b-it-GGUF (~7 GB, good for 16 GB VRAM).
@@ -13,14 +13,19 @@
 .PARAMETER IncludeGemma426BA4B
     Also download Gemma 4 26B-A4B IT UD-Q4_K_M from unsloth/gemma-4-26B-A4B-it-GGUF (~16-17 GB).
 
+.PARAMETER IncludeQwen36Q2
+    Also download Qwen3.6-35B-A3B-UD-Q2_K_XL (2-bit quant, ~13 GB, fits more context in VRAM).
+
 .PARAMETER Model
-    Optional. gemma312 / gemma426ba4b mirror the -Include* switches. Qwen models always download.
+    Optional. gemma312 / gemma426ba4b / qwen3635ba3b2bit mirror the -Include* switches. Qwen Q4 models always download.
 #>
 
 param(
     [switch]$IncludeGemma312,
 
     [switch]$IncludeGemma426BA4B,
+
+    [switch]$IncludeQwen36Q2,
 
     [string]$Model
 )
@@ -30,15 +35,18 @@ $ErrorActionPreference = "Stop"
 # Map -Model to -Include* (same names as run.ps1)
 $downloadGemma312 = [bool]$IncludeGemma312
 $downloadGemma426BA4B = [bool]$IncludeGemma426BA4B
+$downloadQwen36Q2 = [bool]$IncludeQwen36Q2
 if ($PSBoundParameters.ContainsKey("Model") -and -not [string]::IsNullOrWhiteSpace($Model)) {
     $m = $Model.Trim()
     if ($m -eq "gemma312") {
         $downloadGemma312 = $true
     } elseif ($m -eq "gemma426ba4b") {
         $downloadGemma426BA4B = $true
+    } elseif ($m -eq "qwen3635ba3b2bit") {
+        $downloadQwen36Q2 = $true
     } else {
-        Write-Err "setup.ps1 -Model only accepts 'gemma312' or 'gemma426ba4b'."
-        Write-Host "  To run the server: .\run.ps1 -Model 9b | 35b | gemma312 | gemma426ba4b" -ForegroundColor Yellow
+        Write-Err "setup.ps1 -Model only accepts 'gemma312', 'gemma426ba4b', or 'qwen3635ba3b2bit'."
+        Write-Host "  To run the server: .\run.ps1 -Model 9b | 35b | gemma312 | gemma426ba4b | qwen3635ba3b2bit" -ForegroundColor Yellow
         exit 1
     }
 }
@@ -224,20 +232,37 @@ function Download-Model([string]$Repo, [string]$Pattern, [string]$Name) {
         return
     }
     Write-Host "  Downloading $Name from $Repo..."
-    Write-Host "  (This may take a while depending on your connection)"
+    Write-Host "  (This may take a while depending on your connection; progress shown below)"
     
     $pyScript = @"
 import os
+import fnmatch
 import warnings
 warnings.filterwarnings('ignore')
-from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id='$Repo',
-    allow_patterns=['$Pattern'],
-    local_dir=r'$ModelsDir',
-    token=os.environ.get('HF_TOKEN')
+from huggingface_hub import HfApi, hf_hub_download
+
+repo_id = '$Repo'
+pattern = '$Pattern'
+local_dir = r'$ModelsDir'
+token = os.environ.get('HF_TOKEN')
+
+api = HfApi(token=token)
+repo_files = api.list_repo_files(repo_id=repo_id, repo_type='model')
+matches = [f for f in repo_files if fnmatch.fnmatch(f, pattern)]
+if not matches:
+    raise RuntimeError(f'No file matching pattern {pattern!r} in {repo_id}')
+
+# Download the first match with tqdm progress output.
+target_file = matches[0]
+hf_hub_download(
+    repo_id=repo_id,
+    filename=target_file,
+    local_dir=local_dir,
+    token=token,
+    repo_type='model',
+    resume_download=True,
 )
-print('DOWNLOAD_SUCCESS')
+print('DOWNLOAD_SUCCESS:' + target_file)
 "@
     
     $pyScriptFile = Join-Path $env:TEMP "hf_download.py"
@@ -246,15 +271,14 @@ print('DOWNLOAD_SUCCESS')
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $result = & python $pyScriptFile 2>&1
+        & python $pyScriptFile
         $pyExit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEap
     }
     Remove-Item $pyScriptFile -Force -ErrorAction SilentlyContinue
     
-    $resultText = $result | Out-String
-    if ($pyExit -eq 0 -and $resultText -match "DOWNLOAD_SUCCESS") {
+    if ($pyExit -eq 0) {
         $downloaded = Get-ChildItem $ModelsDir -Filter $Pattern -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($downloaded) {
             $sizeGB = [math]::Round($downloaded.Length / 1GB, 2)
@@ -263,14 +287,17 @@ print('DOWNLOAD_SUCCESS')
             Write-Err "$Name download completed but file not found"
         }
     } else {
-        Write-Host "  $resultText" -ForegroundColor Yellow
         Write-Err "$Name download failed"
     }
 }
 
 Download-Model "unsloth/Qwen3.5-9B-GGUF" "*Q4_K_M*" "Qwen3.5-9B Q4_K_M"
-Download-Model "unsloth/Qwen3.5-35B-A3B-GGUF" "*Q4_K_XL*" "Qwen3.5-35B-A3B UD-Q4_K_XL"
+Download-Model "unsloth/Qwen3.6-35B-A3B-GGUF" "Qwen3.6-35B-A3B-UD-Q4_K_S.gguf" "Qwen3.6-35B-A3B UD-Q4_K_S"
+Download-Model "mradermacher/Qwen3-8B-Uncensor-v2-GGUF" "*Q4_K_M*.gguf" "Qwen3-8B-Uncensor-v2 Q4_K_M"
 
+if ($downloadQwen36Q2) {
+    Download-Model "unsloth/Qwen3.6-35B-A3B-GGUF" "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf" "Qwen3.6-35B-A3B UD-Q2_K_XL (2-bit)"
+}
 if ($downloadGemma312) {
     Download-Model "unsloth/gemma-3-12b-it-GGUF" "gemma-3-12b-it-Q4_K_M.gguf" "Gemma 3 12B IT Q4_K_M"
 }
@@ -309,24 +336,34 @@ Write-Step "Setup Complete"
 Write-Host ""
 Write-Host "  Docker image:    ghcr.io/ggml-org/llama.cpp:server-cuda" -ForegroundColor White
 Write-Host "  Primary model:   Qwen3.5-9B Q4_K_M" -ForegroundColor White
+Write-Host "  Primary model:   Qwen3-8B-Uncensor-v2 Q4_K_M" -ForegroundColor White
 Write-Host "  Secondary model: Qwen3.5-35B-A3B UD-Q4_K_XL" -ForegroundColor White
+Write-Host "  Secondary model: Qwen3.6-35B-A3B UD-Q4_K_S" -ForegroundColor White
 if ($downloadGemma312) {
     Write-Host "  Optional model:  Gemma 3 12B IT Q4_K_M (16 GB VRAM friendly)" -ForegroundColor White
 }
 if ($downloadGemma426BA4B) {
     Write-Host "  Optional model:  Gemma 4 26B-A4B IT UD-Q4_K_M (~16-17 GB)" -ForegroundColor White
 }
+if ($downloadQwen36Q2) {
+    Write-Host "  Optional model:  Qwen3.6-35B-A3B UD-Q2_K_XL (2-bit, ~13 GB)" -ForegroundColor White
+}
 Write-Host "  Server port:     $ServerPort" -ForegroundColor White
 Write-Host ""
 Write-Host "  ~16 GB VRAM (e.g. RTX 4080) - Unsloth single-file GGUF:" -ForegroundColor Cyan
 Write-Host "  .\setup.ps1 -IncludeGemma312  # or -Model gemma312  (~7 GB)" -ForegroundColor Gray
 Write-Host "  .\setup.ps1 -IncludeGemma426BA4B # or -Model gemma426ba4b (~16-17 GB)" -ForegroundColor Gray
+Write-Host "  .\setup.ps1 -IncludeQwen36Q2  # or -Model qwen3635ba3b2bit (~13 GB, more context)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Run the server:" -ForegroundColor Cyan
 Write-Host "  .\run.ps1                  # Start with 9B model" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model qwen3uncensored8b # Start with uncensored Qwen3 8B" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model 35b       # Start with 35B MoE model" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model qwen3635ba3b # Start with Qwen3.6-35B-A3B (Q4)" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model qwen3635ba3b2bit # Qwen3.6-35B-A3B (Q2, more ctx)" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model gemma312  # Gemma 3 12B IT" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model gemma426ba4b # Gemma 4 26B-A4B IT" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Thinking        # Enable thinking/reasoning mode" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Restart         # Restart server" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Stop            # Stop server" -ForegroundColor Gray
 Write-Host ""
