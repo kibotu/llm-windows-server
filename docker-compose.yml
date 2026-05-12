@@ -56,14 +56,12 @@
 services:
 
   # ---------------------------------------------------------------------------
-  # llm — llama.cpp HTTP server (CUDA + CPU-MoE hybrid)
+  # llm — llama.cpp HTTP server with MTP support (built from Dockerfile.mtp)
   # ---------------------------------------------------------------------------
   llm:
-    # Pin to a specific release tag rather than floating :server-cuda.
-    # Check https://github.com/ggml-org/llama.cpp/releases for latest stable.
-    # Example: image: ghcr.io/ggml-org/llama.cpp:server-cuda-b5300
-    # Using latest tag here for ease — swap to a pinned tag for production.
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    # Build from MTP-enabled fork (Indra's Mirror or am17an's branch)
+    # See Dockerfile.mtp for configuration options
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda13
 
     container_name: llm-server
 
@@ -110,37 +108,26 @@ services:
 
     command: >-
       -m /models/${MODEL_FILE:-Qwen3.6-35B-A3B-UD-IQ4_XS.gguf}
-
-      -c ${CONTEXT_SIZE:-65536}
-
+      -c ${CONTEXT_SIZE:-131072}
       -ctk ${KV_CACHE_TYPE:-q8_0}
       -ctv ${KV_CACHE_TYPE:-q8_0}
-
-      -ngl 999
-
-      -t ${THREADS:-8}
-
+      -ngl 99
+      -t ${THREADS:-10}
       -b ${BATCH_SIZE:-2048}
-      -ub ${BATCH_SIZE:-2048}
-
+      -ub ${UBATCH_SIZE:-2048}
       --host 0.0.0.0
       --port 8888
-
       --flash-attn on
-
-      --parallel ${N_PARALLEL:-4}
+      --parallel 1
       --cont-batching
-
-      --reasoning ${REASONING:-off}
+      --reasoning on
+      --chat-template-kwargs '{"preserve_thinking":true,"enable_thinking":true}'
       --jinja
       --metrics
-
       --cpu-moe
-
       --no-mmap
-
+      --mlock
       --numa distribute
-
       ${EXTRA_LLAMA_FLAGS:-}
 
   # ---------------------------------------------------------------------------

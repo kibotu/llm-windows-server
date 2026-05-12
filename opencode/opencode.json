@@ -2,45 +2,39 @@
   "$schema": "https://opencode.ai/config.json",
   "provider": {
     "llama-at-home": {
-      "name": "Llama.cpp (RTX4080)",
+      "name": "Kira",
       "npm": "@ai-sdk/openai-compatible",
       "options": {
-        "baseURL": "http://1.2.3.4:8899/v1",
-        "timeout": 180000,
-        "chunkTimeout": 30000
+        "baseURL": "http://127.0.0.1:8899/v1",
+        "apiKey": "sk-local",
+        "timeout": 300000,
+        "chunkTimeout": 120000
       },
       "models": {
+        "qwen36-35b": {
+          "name": "Qwen3.6-35B-A3B (Q4_K_M)",
+          "limit": {
+            "context": 131072,
+            "output": 8000
+          }
+        },
         "Qwen3.5-9B": {
           "name": "Qwen3.5-9B",
           "limit": {
             "context": 128000,
             "output": 6000
           }
-        },
-        "gemma-3-12b-it-Q4_K_M": {
-          "name": "gemma-3-12b-it-Q4_K_M",
-          "limit": {
-            "context": 128000,
-            "output": 8000
-          }
-        },
-        "gemma-4-26B-A4B-it-UD-Q4_K_M": {
-          "name": "gemma-4-26B-A4B-it-UD-Q4_K_M",
-          "limit": {
-            "context": 128000,
-            "output": 8000
-          }
         }
       }
     }
   },
-  "model": "llama-at-home/Qwen3.5-9B",
-  "small_model": "llama-at-home/Qwen3.5-9B",
+  "model": "llama-at-home/qwen36-35b",
+  "small_model": "llama-at-home/qwen36-35b",
   "snapshot": false,
   "compaction": {
     "auto": true,
     "prune": true,
-    "reserved": 10000
+    "reserved": 8096
   },
   "tools": {
     "write": true,
@@ -63,9 +57,41 @@
   "autoupdate": false,
   "permission": {
     "bash": {
-      "deny": ["git"]
+      "*": "ask",
+      "git *": "deny",
+      "npm *": "allow",
+      "rm *": "deny",
+      "grep *": "allow",
+      "find *": "allow",
+      "xargs *": "allow",
+      "head *": "allow",
+      "tail *": "allow",
+      "cat *": "allow",
+      "sed *": "allow",
+      "ls *": "allow",
+      "gradlew *": "allow",
+      "adb *": "allow",
+      "echo *": "allow",
+      "curl *": "allow",
+      "wget *": "allow",
+      "sort *": "allow",
+      "uniq *": "allow",
+      "hexdump *": "allow",
+      "mkdir *": "allow",
+      "mv *": "allow",
+      "wc *": "allow"
     },
     "edit": "allow",
     "write": "allow"
+  },
+  "mcp": {
+    "chrome-devtools": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "chrome-devtools-mcp@latest"
+      ]
+    }
   }
 }
