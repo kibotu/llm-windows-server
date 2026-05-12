@@ -1,6 +1,8 @@
 # LLM Server
 
-Private OpenAI-compatible inference on your NVIDIA GPU. Zero per-token cost, no rate limits, code stays on your LAN.
+[![Medium](https://img.shields.io/badge/Medium-@kibotu-000000?style=flat-square&logo=medium&logoColor=white)](https://medium.com/@kibotu/two-paths-to-local-llm-servers-windows-nvidia-vs-mac-apple-silicon-1e28d606f600?sk=a5d9989d124d7f9b844927f0f545ed09)
+
+Turn your idle Windows machine with an NVIDIA GPU into a low-latency, private LLM inference server. Docker-based OpenAI-compatible API with usage tracking and optional high-load benchmarking.
 
 ## Quick Start
 
