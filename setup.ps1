@@ -5,27 +5,55 @@
 
 .DESCRIPTION
     Installs Docker Desktop, verifies GPU access, pulls the llama.cpp
-    server image, downloads Qwen models (including Qwen3.6-35B-A3B and an uncensored Qwen3 8B variant), and configures firewall.
+    server image, downloads Qwen3.5-9B (default) to HuggingFace cache and links
+    to models/ for Docker access, and configures firewall.
 
-.PARAMETER IncludeGemma312
-    Also download Gemma 3 12B IT Q4_K_M from unsloth/gemma-3-12b-it-GGUF (~7 GB, good for 16 GB VRAM).
+.PARAMETER IncludeQwen3635ba3b
+    Also download Qwen3.6-35B-A3B UD-Q4_K_S (~21 GB). MoE model, good with -MoeOffload.
 
-.PARAMETER IncludeGemma426BA4B
-    Also download Gemma 4 26B-A4B IT UD-Q4_K_M from unsloth/gemma-4-26B-A4B-it-GGUF (~16-17 GB).
+.PARAMETER IncludeQwen3Uncensored8b
+    Also download Qwen3-8B-Uncensor-v2 Q4_K_M (~5 GB). Uncensored 8B variant.
 
 .PARAMETER IncludeQwen36Q2
     Also download Qwen3.6-35B-A3B-UD-Q2_K_XL (2-bit quant, ~13 GB, fits more context in VRAM).
 
+.PARAMETER IncludeQwen36IQ4
+    Also download Qwen3.6-35B-A3B IQ4_XS (4-bit imatrix quant, ~14 GB).
+
+.PARAMETER IncludeQwen36Heretic
+    Also download Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved Q4_K_M (~22 GB).
+    Uncensored model with native Multi-Token Prediction (MTP) support.
+
+.PARAMETER IncludeQwen36Opus47
+    Also download lordx64-Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-MTP Q4_K_M (~20 GB).
+    Claude 4.7 Opus reasoning distillation with native MTP support. Best for code/reasoning.
+
+.PARAMETER IncludeGemma312
+    Also download Gemma 3 12B IT Q4_K_M (~7 GB).
+
+.PARAMETER IncludeGemma426BA4B
+    Also download Gemma 4 26B-A4B IT UD-Q4_K_M (~16 GB). MoE model.
+
 .PARAMETER Model
-    Optional. gemma312 / gemma426ba4b / qwen3635ba3b2bit mirror the -Include* switches. Qwen Q4 models always download.
+    Shorthand for -Include* switches. Accepts: 35b, qwen3uncensored8b, qwen3635ba3b2bit, qwen3635ba3b4bit, qwen36heretic, qwen36opus47, gemma312, gemma426ba4b.
 #>
 
 param(
+    [switch]$IncludeQwen3635ba3b,
+
+    [switch]$IncludeQwen3Uncensored8b,
+
+    [switch]$IncludeQwen36Q2,
+
+    [switch]$IncludeQwen36IQ4,
+
+    [switch]$IncludeQwen36Heretic,
+
+    [switch]$IncludeQwen36Opus47,
+
     [switch]$IncludeGemma312,
 
     [switch]$IncludeGemma426BA4B,
-
-    [switch]$IncludeQwen36Q2,
 
     [string]$Model
 )
@@ -33,20 +61,35 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Map -Model to -Include* (same names as run.ps1)
+$downloadQwen3635ba3b = [bool]$IncludeQwen3635ba3b
+$downloadQwen3Uncensored8b = [bool]$IncludeQwen3Uncensored8b
+$downloadQwen36Q2 = [bool]$IncludeQwen36Q2
+$downloadQwen36IQ4 = [bool]$IncludeQwen36IQ4
+$downloadQwen36Heretic = [bool]$IncludeQwen36Heretic
+$downloadQwen36Opus47 = [bool]$IncludeQwen36Opus47
 $downloadGemma312 = [bool]$IncludeGemma312
 $downloadGemma426BA4B = [bool]$IncludeGemma426BA4B
-$downloadQwen36Q2 = [bool]$IncludeQwen36Q2
+
 if ($PSBoundParameters.ContainsKey("Model") -and -not [string]::IsNullOrWhiteSpace($Model)) {
     $m = $Model.Trim()
-    if ($m -eq "gemma312") {
+    if ($m -eq "35b" -or $m -eq "qwen3635ba3b") {
+        $downloadQwen3635ba3b = $true
+    } elseif ($m -eq "qwen3uncensored8b") {
+        $downloadQwen3Uncensored8b = $true
+    } elseif ($m -eq "qwen3635ba3b2bit") {
+        $downloadQwen36Q2 = $true
+    } elseif ($m -eq "qwen3635ba3b4bit") {
+        $downloadQwen36IQ4 = $true
+    } elseif ($m -eq "qwen36heretic") {
+        $downloadQwen36Heretic = $true
+    } elseif ($m -eq "qwen36opus47") {
+        $downloadQwen36Opus47 = $true
+    } elseif ($m -eq "gemma312") {
         $downloadGemma312 = $true
     } elseif ($m -eq "gemma426ba4b") {
         $downloadGemma426BA4B = $true
-    } elseif ($m -eq "qwen3635ba3b2bit") {
-        $downloadQwen36Q2 = $true
     } else {
-        Write-Err "setup.ps1 -Model only accepts 'gemma312', 'gemma426ba4b', or 'qwen3635ba3b2bit'."
-        Write-Host "  To run the server: .\run.ps1 -Model 9b | 35b | gemma312 | gemma426ba4b | qwen3635ba3b2bit" -ForegroundColor Yellow
+        Write-Host "  !! setup.ps1 -Model accepts: 35b, qwen3uncensored8b, qwen3635ba3b2bit, qwen3635ba3b4bit, qwen36heretic, qwen36opus47, gemma312, gemma426ba4b" -ForegroundColor Red
         exit 1
     }
 }
@@ -224,6 +267,10 @@ if ($LASTEXITCODE -ne 0) {
     python -m pip install huggingface_hub --quiet
 }
 
+# Show HF cache location
+$hfHome = if ($env:HF_HOME) { $env:HF_HOME } else { Join-Path $env:USERPROFILE ".cache\huggingface" }
+Write-Host "  -> HF cache: $hfHome" -ForegroundColor Gray
+
 function Download-Model([string]$Repo, [string]$Pattern, [string]$Name) {
     $existing = Get-ChildItem $ModelsDir -Filter $Pattern -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($existing) {
@@ -231,9 +278,10 @@ function Download-Model([string]$Repo, [string]$Pattern, [string]$Name) {
         Write-Skip "$Name already exists ($sizeGB GB)"
         return
     }
-    Write-Host "  Downloading $Name from $Repo..."
+    Write-Host "  Downloading $Name from $Repo to HF cache..."
     Write-Host "  (This may take a while depending on your connection; progress shown below)"
     
+    # Download to HF cache and return the cached file path
     $pyScript = @"
 import os
 import fnmatch
@@ -243,7 +291,6 @@ from huggingface_hub import HfApi, hf_hub_download
 
 repo_id = '$Repo'
 pattern = '$Pattern'
-local_dir = r'$ModelsDir'
 token = os.environ.get('HF_TOKEN')
 
 api = HfApi(token=token)
@@ -252,17 +299,17 @@ matches = [f for f in repo_files if fnmatch.fnmatch(f, pattern)]
 if not matches:
     raise RuntimeError(f'No file matching pattern {pattern!r} in {repo_id}')
 
-# Download the first match with tqdm progress output.
+# Download to HF cache (default behavior without local_dir)
 target_file = matches[0]
-hf_hub_download(
+cached_path = hf_hub_download(
     repo_id=repo_id,
     filename=target_file,
-    local_dir=local_dir,
     token=token,
     repo_type='model',
     resume_download=True,
 )
-print('DOWNLOAD_SUCCESS:' + target_file)
+print('CACHED_PATH:' + cached_path)
+print('FILENAME:' + os.path.basename(target_file))
 "@
     
     $pyScriptFile = Join-Path $env:TEMP "hf_download.py"
@@ -271,7 +318,7 @@ print('DOWNLOAD_SUCCESS:' + target_file)
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        & python $pyScriptFile
+        $output = & python $pyScriptFile 2>&1 | Tee-Object -Variable capturedOutput
         $pyExit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEap
@@ -279,30 +326,71 @@ print('DOWNLOAD_SUCCESS:' + target_file)
     Remove-Item $pyScriptFile -Force -ErrorAction SilentlyContinue
     
     if ($pyExit -eq 0) {
-        $downloaded = Get-ChildItem $ModelsDir -Filter $Pattern -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($downloaded) {
-            $sizeGB = [math]::Round($downloaded.Length / 1GB, 2)
-            Write-Ok "$Name downloaded ($sizeGB GB)"
+        # Parse cached path and filename from output
+        $outputLines = $capturedOutput | ForEach-Object { $_.ToString() }
+        $cachedPath = ($outputLines | Where-Object { $_ -match '^CACHED_PATH:' } | Select-Object -First 1) -replace '^CACHED_PATH:', ''
+        $filename = ($outputLines | Where-Object { $_ -match '^FILENAME:' } | Select-Object -First 1) -replace '^FILENAME:', ''
+        
+        if ($cachedPath -and (Test-Path $cachedPath)) {
+            $linkPath = Join-Path $ModelsDir $filename
+            $cachedSize = [math]::Round((Get-Item $cachedPath).Length / 1GB, 2)
+            
+            # Create symlink in models/ pointing to HF cache
+            if (Test-Path $linkPath) {
+                Remove-Item $linkPath -Force
+            }
+            
+            try {
+                # Try symlink first (requires admin or dev mode on Windows)
+                New-Item -ItemType SymbolicLink -Path $linkPath -Target $cachedPath -ErrorAction Stop | Out-Null
+                Write-Ok "$Name cached ($cachedSize GB) - symlinked to models/"
+            } catch {
+                # Fall back to hardlink (works for files without admin)
+                try {
+                    New-Item -ItemType HardLink -Path $linkPath -Target $cachedPath -ErrorAction Stop | Out-Null
+                    Write-Ok "$Name cached ($cachedSize GB) - hardlinked to models/"
+                } catch {
+                    # Last resort: copy the file
+                    Write-Warn "Cannot create link (enable Developer Mode for symlinks). Copying instead..."
+                    Copy-Item $cachedPath $linkPath
+                    Write-Ok "$Name cached ($cachedSize GB) - copied to models/"
+                }
+            }
         } else {
-            Write-Err "$Name download completed but file not found"
+            Write-Err "$Name download completed but cached file not found"
         }
     } else {
         Write-Err "$Name download failed"
     }
 }
 
+# Default: always download 9B
 Download-Model "unsloth/Qwen3.5-9B-GGUF" "*Q4_K_M*" "Qwen3.5-9B Q4_K_M"
-Download-Model "unsloth/Qwen3.6-35B-A3B-GGUF" "Qwen3.6-35B-A3B-UD-Q4_K_S.gguf" "Qwen3.6-35B-A3B UD-Q4_K_S"
-Download-Model "mradermacher/Qwen3-8B-Uncensor-v2-GGUF" "*Q4_K_M*.gguf" "Qwen3-8B-Uncensor-v2 Q4_K_M"
 
+# Optional models
+if ($downloadQwen3635ba3b) {
+    Download-Model "unsloth/Qwen3.6-35B-A3B-GGUF" "Qwen3.6-35B-A3B-UD-Q4_K_S.gguf" "Qwen3.6-35B-A3B UD-Q4_K_S"
+}
+if ($downloadQwen3Uncensored8b) {
+    Download-Model "mradermacher/Qwen3-8B-Uncensor-v2-GGUF" "*Q4_K_M*.gguf" "Qwen3-8B-Uncensor-v2 Q4_K_M"
+}
 if ($downloadQwen36Q2) {
     Download-Model "unsloth/Qwen3.6-35B-A3B-GGUF" "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf" "Qwen3.6-35B-A3B UD-Q2_K_XL (2-bit)"
+}
+if ($downloadQwen36IQ4) {
+    Download-Model "unsloth/Qwen3.6-35B-A3B-GGUF" "*IQ4_XS*" "Qwen3.6-35B-A3B IQ4_XS (4-bit)"
 }
 if ($downloadGemma312) {
     Download-Model "unsloth/gemma-3-12b-it-GGUF" "gemma-3-12b-it-Q4_K_M.gguf" "Gemma 3 12B IT Q4_K_M"
 }
 if ($downloadGemma426BA4B) {
     Download-Model "unsloth/gemma-4-26B-A4B-it-GGUF" "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf" "Gemma 4 26B-A4B IT UD-Q4_K_M"
+}
+if ($downloadQwen36Heretic) {
+    Download-Model "llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-GGUF" "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q4_K_M.gguf" "Qwen3.6-35B-A3B Uncensored Heretic MTP Q4_K_M"
+}
+if ($downloadQwen36Opus47) {
+    Download-Model "Dyluhn/lordx64-Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-MTP-GGUF" "lordx64-distill-MTP-Q4_K_M.gguf" "Qwen3.6-35B-A3B Claude Opus Distill MTP Q4_K_M"
 }
 
 # ---------- Step 5: Firewall ----------
@@ -334,36 +422,50 @@ if ($existingRule) {
 
 Write-Step "Setup Complete"
 Write-Host ""
-Write-Host "  Docker image:    ghcr.io/ggml-org/llama.cpp:server-cuda" -ForegroundColor White
-Write-Host "  Primary model:   Qwen3.5-9B Q4_K_M" -ForegroundColor White
-Write-Host "  Primary model:   Qwen3-8B-Uncensor-v2 Q4_K_M" -ForegroundColor White
-Write-Host "  Secondary model: Qwen3.5-35B-A3B UD-Q4_K_XL" -ForegroundColor White
-Write-Host "  Secondary model: Qwen3.6-35B-A3B UD-Q4_K_S" -ForegroundColor White
-if ($downloadGemma312) {
-    Write-Host "  Optional model:  Gemma 3 12B IT Q4_K_M (16 GB VRAM friendly)" -ForegroundColor White
+Write-Host "  Docker image:  ghcr.io/ggml-org/llama.cpp:server-cuda" -ForegroundColor White
+Write-Host "  Default model: Qwen3.5-9B Q4_K_M (~5 GB)" -ForegroundColor White
+if ($downloadQwen3635ba3b) {
+    Write-Host "  + Qwen3.6-35B-A3B UD-Q4_K_S (~21 GB)" -ForegroundColor White
 }
-if ($downloadGemma426BA4B) {
-    Write-Host "  Optional model:  Gemma 4 26B-A4B IT UD-Q4_K_M (~16-17 GB)" -ForegroundColor White
+if ($downloadQwen3Uncensored8b) {
+    Write-Host "  + Qwen3-8B-Uncensor-v2 Q4_K_M (~5 GB)" -ForegroundColor White
 }
 if ($downloadQwen36Q2) {
-    Write-Host "  Optional model:  Qwen3.6-35B-A3B UD-Q2_K_XL (2-bit, ~13 GB)" -ForegroundColor White
+    Write-Host "  + Qwen3.6-35B-A3B UD-Q2_K_XL (~13 GB)" -ForegroundColor White
 }
-Write-Host "  Server port:     $ServerPort" -ForegroundColor White
+if ($downloadQwen36IQ4) {
+    Write-Host "  + Qwen3.6-35B-A3B IQ4_XS (~14 GB)" -ForegroundColor White
+}
+if ($downloadQwen36Heretic) {
+    Write-Host "  + Qwen3.6-35B-A3B Uncensored Heretic MTP (~22 GB)" -ForegroundColor White
+}
+if ($downloadQwen36Opus47) {
+    Write-Host "  + Qwen3.6-35B-A3B Claude Opus Distill MTP (~20 GB)" -ForegroundColor White
+}
+if ($downloadGemma312) {
+    Write-Host "  + Gemma 3 12B IT Q4_K_M (~7 GB)" -ForegroundColor White
+}
+if ($downloadGemma426BA4B) {
+    Write-Host "  + Gemma 4 26B-A4B IT UD-Q4_K_M (~16 GB)" -ForegroundColor White
+}
+Write-Host "  Server port:   $ServerPort" -ForegroundColor White
 Write-Host ""
-Write-Host "  ~16 GB VRAM (e.g. RTX 4080) - Unsloth single-file GGUF:" -ForegroundColor Cyan
-Write-Host "  .\setup.ps1 -IncludeGemma312  # or -Model gemma312  (~7 GB)" -ForegroundColor Gray
-Write-Host "  .\setup.ps1 -IncludeGemma426BA4B # or -Model gemma426ba4b (~16-17 GB)" -ForegroundColor Gray
-Write-Host "  .\setup.ps1 -IncludeQwen36Q2  # or -Model qwen3635ba3b2bit (~13 GB, more context)" -ForegroundColor Gray
+Write-Host "  Download additional models:" -ForegroundColor Cyan
+Write-Host "  .\setup.ps1 -IncludeQwen3635ba3b       # 35B MoE (~21 GB)" -ForegroundColor Gray
+Write-Host "  .\setup.ps1 -IncludeQwen3Uncensored8b  # Uncensored 8B (~5 GB)" -ForegroundColor Gray
+Write-Host "  .\setup.ps1 -IncludeQwen36Heretic      # Uncensored 35B + MTP (~22 GB)" -ForegroundColor Gray
+Write-Host "  .\setup.ps1 -IncludeQwen36Opus47       # Opus distill + MTP (~20 GB)" -ForegroundColor Gray
+Write-Host "  .\setup.ps1 -IncludeGemma312           # Gemma 3 12B (~7 GB)" -ForegroundColor Gray
+Write-Host "  .\setup.ps1 -IncludeGemma426BA4B       # Gemma 4 26B-A4B MoE (~16 GB)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Run the server:" -ForegroundColor Cyan
-Write-Host "  .\run.ps1                  # Start with 9B model" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Model qwen3uncensored8b # Start with uncensored Qwen3 8B" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Model 35b       # Start with 35B MoE model" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Model qwen3635ba3b # Start with Qwen3.6-35B-A3B (Q4)" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Model qwen3635ba3b2bit # Qwen3.6-35B-A3B (Q2, more ctx)" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Model gemma312  # Gemma 3 12B IT" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Model gemma426ba4b # Gemma 4 26B-A4B IT" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Thinking        # Enable thinking/reasoning mode" -ForegroundColor Gray
+Write-Host "  .\run.ps1                      # 9B (default)" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model 35b           # 35B MoE" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model qwen36opus47 -Mtp -Thinking  # Opus + MTP" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model qwen36heretic -Mtp -Thinking # Uncensored + MTP" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model qwen36opus47 -Tbq4           # TBQ4 fused FA (~25% faster)" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Thinking            # Enable reasoning mode" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Mtp             # Enable Multi-Token Prediction (MTP models only)" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Restart         # Restart server" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Stop            # Stop server" -ForegroundColor Gray
 Write-Host ""
