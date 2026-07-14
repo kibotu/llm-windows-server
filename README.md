@@ -183,6 +183,18 @@ does, and why it's set the way it is. Values in **bold** are the defaults here.
 | `--mlock` | **on** | Lock model + KV cache into RAM so the OS never swaps them to the page file. |
 | `--numa distribute` | **on** | Spread threads/memory across NUMA nodes. Helps on multi-socket boxes, harmless on single-socket. |
 
+### Optional extras (not on by default)
+
+Not set by `run.ps1`, but useful in specific cases — pass them via `-ExtraFlags`.
+
+| Flag | Try when | What it does |
+|------|----------|--------------|
+| `--cache-reuse 256` | You reuse a long, fixed system prompt | Reuses cached KV for the shared prefix, skipping its prefill on every request. |
+| `--defrag-thold 0.1` | Long-running server, many short requests | Defragments the KV cache once it's >10% fragmented, reclaiming slot space. |
+| `--slot-save-path /logs` | Clients reconnect often | Persists per-slot state to disk so a session can resume without re-prefilling. |
+| `--threads-batch N` | Prompt ingestion is CPU-bound | Uses a separate (usually higher) thread count for batch/prefill vs generation. |
+| `-ctk q4_0 -ctv q4_0` | You hit VRAM limits at long context | Halves KV-cache VRAM again beyond `q8_0` (use `-KvCache q4_0` for this directly). |
+
 > **Overriding flags:** anything not exposed as a `run.ps1` parameter can be passed
 > through with `-ExtraFlags`, e.g. `.\run.ps1 -ExtraFlags "--cache-reuse 256 --defrag-thold 0.1"`.
 
