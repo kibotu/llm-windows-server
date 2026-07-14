@@ -186,17 +186,68 @@ does, and why it's set the way it is. Values in **bold** are the defaults here.
 ### Optional extras (not on by default)
 
 Not set by `run.ps1`, but useful in specific cases — pass them via `-ExtraFlags`.
+These reduce **latency** (time-to-first-token) or VRAM; none of them raise raw
+tokens/s (see the next section for that).
 
 | Flag | Try when | What it does |
 |------|----------|--------------|
-| `--cache-reuse 256` | You reuse a long, fixed system prompt | Reuses cached KV for the shared prefix, skipping its prefill on every request. |
+| `--cache-reuse 256` | RAG / dynamic content mid-prompt | Reuses cached KV chunks even when the shared text isn't a pure prefix. Caveats: if the model runs SWA layers it also needs `--swa-full` (big VRAM cost at long context), and on Qwen3.5/3.6-arch GGUFs the checkpoint cache is reported inert — so test before relying on it. |
 | `--defrag-thold 0.1` | Long-running server, many short requests | Defragments the KV cache once it's >10% fragmented, reclaiming slot space. |
 | `--slot-save-path /logs` | Clients reconnect often | Persists per-slot state to disk so a session can resume without re-prefilling. |
 | `--threads-batch N` | Prompt ingestion is CPU-bound | Uses a separate (usually higher) thread count for batch/prefill vs generation. |
 | `-ctk q4_0 -ctv q4_0` | You hit VRAM limits at long context | Halves KV-cache VRAM again beyond `q8_0` (use `-KvCache q4_0` for this directly). |
 
 > **Overriding flags:** anything not exposed as a `run.ps1` parameter can be passed
-> through with `-ExtraFlags`, e.g. `.\run.ps1 -ExtraFlags "--cache-reuse 256 --defrag-thold 0.1"`.
+> through with `-ExtraFlags`, e.g. `.\run.ps1 -ExtraFlags "--cache-reuse 256 --swa-full"`.
+
+### Improving tokens/s (MoE + `--cpu-moe`)
+
+With experts offloaded to RAM, **generation speed is capped by DDR5 memory
+bandwidth** — every token streams the active expert weights from system RAM.
+That makes the effective levers different from a fully-on-GPU model:
+
+1. **Sweep `--n-cpu-moe` and benchmark — the #1 knob.** Counter-intuitively,
+   *all experts on CPU* (the default `--cpu-moe`) is usually fastest on 12–16 GB
+   cards; moving experts back onto the GPU tends to make generation **slower**.
+   Confirm on your hardware:
+
+   ```powershell
+   docker exec -it llm-server llama-bench -m /models/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf -ngl 99 -ncmoe 48 -n 128 -r 3
+   ```
+
+   Lower the `-ncmoe` value to keep more expert layers on the GPU and compare tok/s.
+2. **Sweep threads (`-Threads`).** MoE expert compute is bandwidth-bound, so more
+   threads isn't always faster — past RAM-bandwidth saturation extra threads just
+   contend with sampling. Benchmark 8 / 12 / 16 / 20; the peak is often lower than expected.
+3. **RAM bandwidth is the hardware ceiling.** Enable XMP/EXPO in BIOS and populate
+   both channels — this moves tok/s more than any flag when experts live in RAM.
+4. **`-Batch`/`-UBatch` speed up *prefill*, not generation.** They're already raised
+   to 4096 for MoE, which helps long-prompt TTFT but not steady-state tok/s.
+5. **`-Thinking:$false`** *feels* faster (fewer tokens generated), but raw tok/s is unchanged.
+6. **Speculative decoding isn't worth it here.** Only ~3B params are active per token
+   in this 35B-A3B MoE, so draft-model overhead rarely pays off.
+
+### Prompt caching for coding agents (OpenCode, Cursor, etc.)
+
+Agents resend the system prompt **and** the whole conversation every turn. That's
+fine — `llama-server` caches a stable leading prefix by default (`cache_prompt: true`),
+so an unchanged system prompt is **not** re-prefilled each turn. Two things break
+that cache and cause the slow "reprocessing from the system prompt" pause:
+
+1. **Dropped reasoning blocks.** With thinking on, the model emits `<think>` blocks,
+   but many agents strip `reasoning_content` from history when they replay the
+   conversation. The KV cache then diverges right after the first assistant turn and
+   everything after it is reprocessed every turn. We mitigate this server-side with
+   `--reasoning-preserve` (always set in `docker-compose.yml`) — the standard
+   llama.cpp flag that keeps reasoning in the full history for templates that
+   advertise `supports_preserve_reasoning` (Qwen3.6 does). **Also make sure the
+   client sends `reasoning_content` back** — e.g. in OpenCode don't strip thinking
+   from history — otherwise the server can't rebuild it. If your agent can't preserve
+   thinking, running that agent with `-Thinking:$false` sidesteps the issue entirely
+   (no `<think>` block to drop, so the prefix cache just works).
+2. **Dynamic content at the top of the prompt** (timestamps, changing tool order).
+   Keep the prefix byte-identical across turns; move any volatile text to the end of
+   the user message. This is the case where `--cache-reuse` (see above) can help.
 
 ---
 
