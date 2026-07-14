@@ -12,25 +12,56 @@ Two scripts, one Docker command, sensible defaults for **Qwen3.6-35B-A3B** with 
 .\run.ps1       # start the server (stays in the foreground, streams logs)
 ```
 
-API endpoint: `http://localhost:8899/v1`
+Before the first run, copy `.env.example` to `.env` and add your Hugging Face token.
+`setup.ps1` then generates a random `LLAMA_API_KEY` into `.env`, and `run.ps1` prints
+both the endpoint and the key on startup.
 
-`setup.ps1` generates a random **API key** into `.env` (`LLAMA_API_KEY`). Clients
-must send it as `Authorization: Bearer <key>`. `run.ps1` prints the key on startup.
+That's it — the server is now serving an OpenAI-compatible API at `http://localhost:8899/v1`.
 
-Put your Hugging Face token in `.env` first (copy `.env.example` to `.env`).
+## Connect a client
 
----
+- **Base URL:** `http://<host-ip>:8899/v1`
+- **API key:** the `LLAMA_API_KEY` from `.env`, sent as `Authorization: Bearer <key>`
 
-## Two scripts, that's it
+Every request is validated against `LLAMA_API_KEY` by the usage-tracker proxy; a
+missing or wrong key gets a `401` (only `/health` stays open). Leaving the key blank
+disables auth entirely. Quick check:
 
-| Script | What it does |
-|--------|--------------|
-| `setup.ps1` | **Setup + update in one.** Installs Docker Desktop, verifies GPU access, installs the latest Hugging Face CLI, pulls the latest llama.cpp image, rebuilds the usage-tracker proxy, downloads the model, opens the firewall, prunes old Docker layers. Idempotent — re-run it to update. |
-| `run.ps1` | **Start / reconcile / stop.** Starts the server with your chosen settings and streams logs. Re-run any time to change settings on the live server. `-Stop` tears it down. |
+```bash
+curl http://<host-ip>:8899/v1/models -H "Authorization: Bearer <your-key>"
+```
 
-The project is deliberately minimal — just these two scripts plus the Compose stack.
+Works with Cursor, Continue, the OpenAI SDK, and any OpenAI-compatible client. For
+`<host-ip>`, use `127.0.0.1` on the same machine, the LAN IP from another device, or
+a [Tailscale](https://tailscale.com) IP (`tailscale ip -4`) for secure remote access.
 
----
+### OpenCode
+
+A ready-to-use config ships in [`opencode/opencode.json`](opencode/opencode.json). It
+exposes both models and points at the server through the proxy.
+
+1. Copy it into place on the client:
+
+   ```bash
+   mkdir -p ~/.config/opencode
+   cp opencode/opencode.json ~/.config/opencode/opencode.json
+   ```
+
+2. Set `baseURL` to your endpoint and `apiKey` to your key (both printed by the
+   `run.ps1` banner):
+
+   ```jsonc
+   "options": {
+     "baseURL": "http://<host-ip>:8899/v1",
+     "apiKey": "sk-...your LLAMA_API_KEY from .env..."
+   }
+   ```
+
+3. Start OpenCode — it defaults to `llama-at-home/qwen36-35b`. Switch models with the
+   picker or the `"model"` field.
+
+The shipped config also sets sensible context limits, auto-compaction, and tool
+permissions; trim the `permission` / `mcp` blocks to taste — they're just a demo.
 
 ## Models
 
@@ -39,15 +70,17 @@ The project is deliberately minimal — just these two scripts plus the Compose 
 | `qwen36` | Qwen3.6-35B-A3B IQ4_XS | ~17 GB | Yes | **Default.** MoE, experts offloaded to RAM. |
 | `qwen35-9b` | Qwen3.5-9B Q4_K_M | ~5 GB | Yes | Lighter, dense, faster. |
 
-Both are downloaded on demand into `.\models\` (gitignored). Switch with `-Model`:
+Both download on demand into `.\models\` (gitignored). Switch with `-Model`:
 
 ```powershell
 .\run.ps1 -Model qwen35-9b
 ```
 
----
+## The two scripts
 
-## `run.ps1`
+The whole project is two PowerShell scripts plus the Compose stack — nothing else to learn.
+
+### `run.ps1` — start, reconcile, stop
 
 ```powershell
 .\run.ps1 [options]
@@ -76,12 +109,15 @@ Both are downloaded on demand into `.\models\` (gitignored). Switch with `-Model
 .\run.ps1 -Stop                       # stop
 ```
 
-Re-running `run.ps1` is safe: Docker Compose recreates the container only when the
-config actually changes. Ctrl+C stops log streaming; the server keeps running.
+Re-running is safe: Docker Compose recreates the container only when the config
+actually changes. Ctrl+C stops log streaming; the server keeps running.
 
----
+### `setup.ps1` — setup + update in one
 
-## `setup.ps1`
+Installs Docker Desktop, verifies GPU access, installs the latest Hugging Face CLI,
+pulls the latest llama.cpp image, rebuilds the usage-tracker proxy, downloads the
+model (via the `hf` CLI reading `HF_TOKEN` from `.env`), opens the firewall, and
+prunes old Docker layers. Idempotent — re-run it to update.
 
 ```powershell
 .\setup.ps1 [-Model qwen36|qwen35-9b] [-SkipModel] [-Clean]
@@ -99,10 +135,6 @@ config actually changes. Ctrl+C stops log streaming; the server keeps running.
 .\setup.ps1 -Clean           # update and reclaim disk
 ```
 
-The model download uses the `hf` CLI and reads `HF_TOKEN` from `.env`.
-
----
-
 ## How it works
 
 ```
@@ -111,8 +143,8 @@ client ──▶ usage-tracker (:8899) ──▶ llama.cpp server (:8888, GPU)
                  └─ records token usage to usage_data.json
 ```
 
-- **`docker-compose.yml`** is the single source of truth for defaults and the image tag.
-  `run.ps1` sets environment variables that the compose `command:` consumes.
+- **`docker-compose.yml`** is the single source of truth for defaults and the image
+  tag. `run.ps1` sets environment variables that the compose `command:` consumes.
 - **MoE expert offloading** (`--cpu-moe`) keeps attention on the GPU while routed
   experts live in DDR5 RAM, so a 35B MoE model runs comfortably on 16 GB VRAM.
 
@@ -124,8 +156,6 @@ client ──▶ usage-tracker (:8899) ──▶ llama.cpp server (:8888, GPU)
 | KV cache | ~1–1.5 GB |
 | CUDA overhead | ~0.5 GB |
 | **Total** | **~15 GB** (routed experts sit in ~6–7 GB of RAM) |
-
----
 
 ## Tuning reference
 
@@ -249,67 +279,6 @@ that cache and cause the slow "reprocessing from the system prompt" pause:
    Keep the prefix byte-identical across turns; move any volatile text to the end of
    the user message. This is the case where `--cache-reuse` (see above) can help.
 
----
-
-## Client configuration
-
-Base URL: `http://<host-ip>:8899/v1`
-API key: the `LLAMA_API_KEY` value from your `.env` (sent as `Authorization: Bearer <key>`).
-
-Works with Cursor, Continue, the OpenAI SDK, and any OpenAI-compatible client.
-For secure remote access, install [Tailscale](https://tailscale.com) and use the
-Tailscale IP (`tailscale ip -4`).
-
-### Authentication
-
-The usage-tracker proxy validates every request against `LLAMA_API_KEY` (generated
-by `setup.ps1` into `.env`). Requests without a matching `Authorization: Bearer <key>`
-header get a `401`. `/health` stays open so probes keep working. Leaving
-`LLAMA_API_KEY` blank disables auth entirely (open server).
-
-```bash
-curl http://<host-ip>:8899/v1/models -H "Authorization: Bearer <your-key>"
-```
-
-### OpenCode (e.g. from a Mac)
-
-A ready-to-use config ships in [`opencode/opencode.json`](opencode/opencode.json).
-It exposes both models and points at the server through the usage-tracker proxy.
-
-1. Copy it into place on the client:
-
-   ```bash
-   mkdir -p ~/.config/opencode
-   cp opencode/opencode.json ~/.config/opencode/opencode.json
-   ```
-
-2. Set the `baseURL` and `apiKey`:
-
-   - **baseURL** — how to reach the server:
-     - **Same machine (Windows host):** leave it as `http://127.0.0.1:8899/v1`.
-     - **From a Mac / another device on the LAN:** use the host's IP, e.g.
-       `http://192.168.1.50:8899/v1` (the `run.ps1` banner prints the LAN URL).
-     - **Over Tailscale:** use the host's Tailscale IP, e.g. `http://100.x.y.z:8899/v1`.
-   - **apiKey** — replace the placeholder with your `LLAMA_API_KEY` from `.env`
-     (the `run.ps1` banner prints it too).
-
-   ```jsonc
-   "options": {
-     "baseURL": "http://<host-ip>:8899/v1",
-     "apiKey": "sk-...your LLAMA_API_KEY from .env..."
-   }
-   ```
-
-3. Start OpenCode — it defaults to `llama-at-home/qwen36-35b`. Switch models with
-   the model picker, or edit the `"model"` field.
-
-> The shipped config uses a placeholder api key
-> (`sk-REPLACE-WITH-LLAMA_API_KEY-FROM-DOTENV`) — swap in your real key. It also
-> sets sensible context limits, auto-compaction, and tool permissions; trim the
-> `permission` / `mcp` blocks to taste, they're just a demo.
-
----
-
 ## Requirements
 
 | Component | Minimum |
@@ -320,23 +289,12 @@ It exposes both models and points at the server through the usage-tracker proxy.
 | Docker | Desktop with WSL2 backend |
 | Python | 3.x (for the Hugging Face CLI) |
 
----
-
-## Files
-
-```
-setup.ps1           Setup + update (Docker, GPU, hf CLI, model, firewall, cleanup)
-run.ps1             Start / reconcile / stop the server
-docker-compose.yml  Service definitions (parameterized, env-var driven)
-Dockerfile          usage-tracker proxy image
-usage_tracker.py    Token-usage proxy
-.env.example        Template — copy to .env and add your HF_TOKEN
-opencode/           Ready-to-use OpenCode client config (opencode.json)
-models/             Downloaded GGUFs (gitignored)
-```
-
----
-
 ## License
 
 Scripts: public domain. Models: see their respective Hugging Face model cards.
+
+## Support
+
+If this saved you a weekend of fighting CUDA errors, guessing at `--n-cpu-moe`
+values, or explaining to your wallet why the cloud inference bill looked like that,
+consider [buying me a coffee](https://www.buymeacoffee.com/kibotu).
