@@ -1,4 +1,4 @@
-# Secrets
+# Secrets (.env.example is committed as a template)
 .env
 
 # Models (large files, download via setup.ps1)

@@ -12,9 +12,9 @@
       },
       "models": {
         "qwen36-35b": {
-          "name": "Qwen3.6-35B-A3B (Q4_K_M)",
+          "name": "Qwen3.6-35B-A3B (IQ4_XS)",
           "limit": {
-            "context": 131072,
+            "context": 262144,
             "output": 8000
           }
         },

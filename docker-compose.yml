@@ -1,84 +1,48 @@
 # =============================================================================
-# llama.cpp LLM Server — Optimized for:
-#   GPU:  NVIDIA RTX 4080 16 GB VRAM
-#   RAM:  96 GB DDR5 (used for MoE expert offload)
-#   OS:   Windows 11 + Docker Desktop (WSL2 backend)
-#   Model: Qwen3.6-35B-A3B (MoE, ~19–20 GB total weights at IQ4_XS)
+# llama.cpp LLM server - OpenAI-compatible API with usage tracking.
 #
-# VRAM BUDGET (approximate at IQ4_XS):
-#   Model weights on GPU (attn + shared expert) : ~13–14 GB
-#   Routed expert weights                        : offloaded to DDR5 RAM
-#   KV cache (q8_0, 16k ctx × 4 slots)          : ~1.5 GB
-#   CUDA overhead + buffers                      : ~0.5 GB
-#   Total GPU                                    : ~15–15.5 GB  (safe on 16 GB)
-#   RAM used for expert offload                  : ~6–7 GB      (trivial on 96 GB)
+# Target box:  NVIDIA RTX 4080 16 GB  -  96 GB DDR5  -  Windows 11 + Docker (WSL2)
+# Flagship:    Qwen3.6-35B-A3B (MoE) at IQ4_XS, experts offloaded to RAM (--cpu-moe).
 #
-# TUNING REFERENCE:
-#   -ngl 999            All non-expert layers to GPU (attention, shared FFN)
-#   --cpu-moe           Routed expert weights live in RAM, streamed over PCIe
-#                       → keeps 16 GB VRAM from blowing up while retaining
-#                         GPU-speed attention / prefill
-#   -c                  Total KV context = per_slot_ctx × n_parallel
-#                       Set to 65536 (16k per slot × 4 slots). Raise to
-#                       131072 if you only use 1–2 concurrent sessions and
-#                       want long context. Lower to 32768 to save ~0.7 GB VRAM.
-#   --parallel 4        4 concurrent request slots. Each gets 16k context.
-#                       Raise to 8 if you have many concurrent callers;
-#                       lower to 1 for max single-session context.
-#   --cont-batching     Essential: without this only ONE request runs at a time
-#                       even with multiple parallel slots.
-#   -b 2048             Physical batch — higher = faster prefill (prompt ingestion)
-#   -ub 2048            Micro-batch MUST equal -b for MoE models (not 512)
-#                       MoE throughput is highly sensitive to this.
-#   -ctk / -ctv q8_0   KV cache at 8-bit halves VRAM vs f16 with minimal quality
-#                       loss. Use q4_0 if you hit VRAM limits at long context.
-#   -t 8                CPU threads for expert compute + sampling. On Windows/WSL2
-#                       do NOT set this to your full core count — leave headroom
-#                       for the OS and Docker overhead. Adjust to your CPU core
-#                       count; 8 is a safe default for most 12–16 core CPUs.
-#   --flash-attn on     Free ~30% VRAM reduction on attention + faster on Ada GPU
-#   --no-mmap           Disable memory-mapped I/O. Slower cold load but prevents
-#                       Windows page-cache eviction from stalling inference.
-#                       Remove if model load time is unacceptable.
-#   --numa distribute   Helps on multi-NUMA systems; harmless on single-socket.
+# You normally don't edit this file. run.ps1 sets the env vars below and reconciles
+# the container. Defaults here are the source of truth; override in .env if needed.
 #
-# ENV VARS (override in a .env file next to this compose file):
-#   MODEL_FILE          GGUF filename inside ./models/ (default: Qwen3.6 IQ4_XS)
-#   CONTEXT_SIZE        Total KV context tokens (default: 65536)
-#   N_PARALLEL          Concurrent slots (default: 4)
-#   KV_CACHE_TYPE       q8_0 (default) | q4_0 (aggressive VRAM saving)
-#   THREADS             CPU threads for expert/sample ops (default: 8)
-#   BATCH_SIZE          Physical batch, must equal UBATCH_SIZE for MoE (default: 2048)
-#   REASONING           on | off — Qwen3 extended thinking mode (default: off)
-#   EXTRA_LLAMA_FLAGS   Pass-through for any additional llama-server flags
+#   MODEL_FILE      GGUF filename in ./models/       (default: Qwen3.6 IQ4_XS)
+#   MMPROJ_FLAGS    --mmproj flag for vision         (set by run.ps1 when present)
+#   CONTEXT_SIZE    Total KV context tokens          (default: 262144)
+#   N_PARALLEL      Concurrent request slots         (default: 1)
+#   KV_CACHE_TYPE   q8_0 | q4_0 | f16                (default: q8_0)
+#   THREADS         CPU threads for experts/sampling (default: 10)
+#   BATCH_SIZE      Physical batch -b                (default: 2048)
+#   UBATCH_SIZE     Micro-batch -ub (== -b for MoE)  (default: 2048)
+#   MOE_FLAGS       Expert offload strategy          (default: --cpu-moe)
+#   REASONING       on | off - Qwen3 thinking mode   (default: on)
+#   EXTRA_LLAMA_FLAGS  Pass-through for extra flags
+#   LLAMA_IMAGE     Pin a specific image/digest      (default: server-cuda13 tag)
 # =============================================================================
 
 services:
 
   # ---------------------------------------------------------------------------
-  # llm — llama.cpp HTTP server with MTP support (built from Dockerfile.mtp)
+  # llm - llama.cpp HTTP server (GPU, MoE-aware). Never exposed directly;
+  #       clients hit the usage-tracker proxy on 8899.
   # ---------------------------------------------------------------------------
   llm:
-    # Build from MTP-enabled fork (Indra's Mirror or am17an's branch)
-    # See Dockerfile.mtp for configuration options
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda13
-
+    image: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda13}
     container_name: llm-server
 
     expose:
       - "8888"
 
     volumes:
-      - ./models:/models:ro    # model files (read-only)
-      - ./logs:/logs            # server logs
+      - ./models:/models:ro
+      - ./logs:/logs
 
-    # Required for CUDA IPC and large GPU allocations on Windows/WSL2.
-    # shm_size prevents "CUDA out of shared memory" errors during batched inference.
-    shm_size: '2g'
+    # CUDA IPC + large GPU allocations on Windows/WSL2.
+    shm_size: "2g"
     ipc: host
 
-    # Prevent the OS from swapping model weights or KV cache to disk.
-    # Critical on Windows where page-file pressure can cause stalls mid-inference.
+    # Keep model weights / KV cache off the page file (prevents mid-inference stalls).
     ulimits:
       memlock:
         soft: -1
@@ -102,13 +66,13 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
-      # Qwen3.6-35B IQ4_XS is ~19 GB on disk. Cold load over a slow NVMe +
-      # CUDA kernel compilation can take 3–5 min on first start. 300s is safe.
+      # Cold load of a ~17 GB GGUF + CUDA kernel compile can take minutes on first start.
       start_period: 300s
 
     command: >-
       -m /models/${MODEL_FILE:-Qwen3.6-35B-A3B-UD-IQ4_XS.gguf}
-      -c ${CONTEXT_SIZE:-131072}
+      ${MMPROJ_FLAGS:-}
+      -c ${CONTEXT_SIZE:-262144}
       -ctk ${KV_CACHE_TYPE:-q8_0}
       -ctv ${KV_CACHE_TYPE:-q8_0}
       -ngl 99
@@ -118,20 +82,19 @@ services:
       --host 0.0.0.0
       --port 8888
       --flash-attn on
-      --parallel 1
+      --parallel ${N_PARALLEL:-1}
       --cont-batching
-      --reasoning on
-      --chat-template-kwargs '{"preserve_thinking":true,"enable_thinking":true}'
+      --reasoning ${REASONING:-on}
       --jinja
       --metrics
-      --cpu-moe
+      ${MOE_FLAGS:---cpu-moe}
       --no-mmap
       --mlock
       --numa distribute
       ${EXTRA_LLAMA_FLAGS:-}
 
   # ---------------------------------------------------------------------------
-  # usage-tracker — lightweight token usage accounting proxy
+  # usage-tracker - thin proxy on 8899 that records token usage and forwards to llm.
   # ---------------------------------------------------------------------------
   usage-tracker:
     build: .
