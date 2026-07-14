@@ -4,6 +4,7 @@ Usage tracking proxy for llama.cpp server.
 Tracks token usage per request with per-day, per-session, and per-client aggregation.
 """
 
+import hmac
 import json
 import os
 import threading
@@ -15,8 +16,23 @@ from flask import Flask, request, Response, jsonify
 app = Flask(__name__)
 
 LLAMA_SERVER_URL = os.environ.get("LLAMA_SERVER_URL", "http://llm:8888")
+# Bearer key clients must present. Empty string disables auth (open server).
+API_KEY = os.environ.get("LLAMA_API_KEY", "").strip()
 TRACKING_FILE = "/data/usage_data.json"
 SESSION_GAP_MINUTES = 30
+
+
+def is_authorized(req) -> bool:
+    """True when auth is disabled, or the request carries the correct API key."""
+    if not API_KEY:
+        return True
+    provided = ""
+    auth = req.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        provided = auth[len("Bearer "):].strip()
+    if not provided:
+        provided = (req.headers.get("x-api-key") or req.headers.get("api-key") or "").strip()
+    return bool(provided) and hmac.compare_digest(provided, API_KEY)
 
 # Thread-safe data storage
 data_lock = threading.Lock()
@@ -131,7 +147,18 @@ def proxy(path):
     if request.method == "OPTIONS":
         response = Response("")
         return add_cors_headers(response)
-    
+
+    # API key check. Health probes stay open so container/LAN checks keep working.
+    if path != "health" and not is_authorized(request):
+        body = json.dumps({"error": {
+            "message": "Invalid or missing API key",
+            "type": "invalid_request_error",
+            "code": "invalid_api_key",
+        }})
+        resp = Response(body, status=401, mimetype="application/json")
+        resp.headers["WWW-Authenticate"] = "Bearer"
+        return add_cors_headers(resp)
+
     # Block /usage paths from being proxied
     if path.startswith("usage"):
         return Response("Not Found", status=404)
@@ -413,5 +440,6 @@ if __name__ == "__main__":
     print(f"Starting usage tracking proxy on http://0.0.0.0:8899")
     print(f"Forwarding to llama.cpp server at {LLAMA_SERVER_URL}")
     print(f"Session gap: {SESSION_GAP_MINUTES} minutes")
+    print(f"API key auth: {'ENABLED' if API_KEY else 'disabled (open server)'}")
     
     app.run(host="0.0.0.0", port=8899, debug=False, threaded=True)

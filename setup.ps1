@@ -9,11 +9,12 @@
       1. Docker Desktop        install (winget) + start
       2. GPU access            verify NVIDIA runtime inside Docker
       3. Hugging Face CLI      install/upgrade latest 'hf' + login from .env
-      4. llama.cpp image       pull the latest image tag from docker-compose.yml
-      5. usage-tracker proxy   (re)build from this repo's Dockerfile
-      6. Model                 download GGUF + vision projector into .\models\
-      7. Firewall              open the server port for LAN access
-      8. Cleanup               prune dangling Docker layers (models untouched)
+      4. Server API key        generate a random key into .env (if missing)
+      5. llama.cpp image       pull the latest image tag from docker-compose.yml
+      6. usage-tracker proxy   (re)build from this repo's Dockerfile
+      7. Model                 download GGUF + vision projector into .\models\
+      8. Firewall              open the server port for LAN access
+      9. Cleanup               prune dangling Docker layers (models untouched)
 
 .PARAMETER Model
     Which model to ensure is downloaded: "qwen36" (default) or "qwen35-9b".
@@ -43,7 +44,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch { }
+try { 
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+    $OutputEncoding = [System.Text.UTF8Encoding]::new()
+} catch { }
 
 # =============================================================================
 # MODEL CATALOG (must match run.ps1)
@@ -73,7 +77,7 @@ $Models = @{
 # TUI
 # =============================================================================
 $script:Step = 0
-$script:StepTotal = 8
+$script:StepTotal = 9
 $EnvFile   = Join-Path $ScriptDir ".env"
 $ModelsDir = Join-Path $ScriptDir "models"
 $LogsDir   = Join-Path $ScriptDir "logs"
@@ -111,6 +115,23 @@ function Get-DotEnvValue {
     $line = Get-Content $EnvFile | Where-Object { $_ -match "^\s*$Key\s*=\s*(.+)$" } | Select-Object -First 1
     if ($line -and $line -match "^\s*$Key\s*=\s*(.+)$") { return $Matches[1].Trim() }
     return $null
+}
+
+function Set-DotEnvValue {
+    param([string]$Key, [string]$Value)
+    $lines = if (Test-Path $EnvFile) { @(Get-Content $EnvFile) } else { @() }
+    $found = $false
+    $out = foreach ($l in $lines) {
+        if ($l -match "^\s*$Key\s*=") { $found = $true; "$Key=$Value" } else { $l }
+    }
+    if (-not $found) { $out = @($out) + "$Key=$Value" }
+    [System.IO.File]::WriteAllText($EnvFile, (($out -join "`r`n") + "`r`n"))
+}
+
+function New-ApiKey {
+    $bytes = New-Object 'System.Byte[]' 24
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    return "sk-" + ([System.BitConverter]::ToString($bytes) -replace '-', '').ToLower()
 }
 
 function Add-DockerToPath {
@@ -246,8 +267,8 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Write-Err "Python not found. Install Python 3, then re-run."
     exit 1
 }
-Write-Info "Ensuring latest 'hf' CLI (huggingface_hub[cli] + hf_transfer)..."
-python -m pip install --quiet --upgrade "huggingface_hub[cli]" hf_transfer
+Write-Info "Ensuring latest 'hf' CLI (huggingface_hub + hf_transfer)..."
+python -m pip install --quiet --upgrade huggingface_hub hf_transfer
 $hf = Get-HfCommand
 if (-not $hf) { Write-Err "'hf' CLI still not on PATH after install."; exit 1 }
 $hfVersion = (& $hf.Name version 2>&1 | Out-String).Trim()
@@ -256,23 +277,43 @@ Write-Ok "hf ready ($hfVersion)"
 $token = Get-DotEnvValue "HF_TOKEN"
 if ($token -and $token -ne "hf_xxx") {
     $env:HF_TOKEN = $token
-    & $hf.Name auth login --token $token 2>&1 | Out-Null
-    Write-Ok "Authenticated with Hugging Face (token from .env)"
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try {
+        & $hf.Name auth login --token $token --add-to-git-credential 2>&1 | Out-Null
+        Write-Ok "Authenticated with Hugging Face (token from .env)"
+    } catch {
+        Write-Warn "HF auth login had warnings, but token is set"
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
 } else {
     Write-Warn "No HF_TOKEN in .env - public models still work; gated ones will fail."
 }
 
-# --- 4. llama.cpp image ------------------------------------------------------
+# --- 4. API key --------------------------------------------------------------
+Write-Step "Server API key"
+$apiKey = Get-DotEnvValue "LLAMA_API_KEY"
+if (-not $apiKey -or $apiKey -eq "sk-xxx") {
+    $apiKey = New-ApiKey
+    Set-DotEnvValue "LLAMA_API_KEY" $apiKey
+    Write-Ok "Generated a new API key and saved it to .env"
+} else {
+    Write-Skip "API key already present in .env"
+}
+Write-Info "Clients authenticate with: Authorization: Bearer $apiKey"
+Write-Info "Put this key in your client config (e.g. opencode/opencode.json)"
+
+# --- 5. llama.cpp image ------------------------------------------------------
 Write-Step "llama.cpp server image"
 Invoke-Compose @("pull", "llm")
 Write-Ok "Image up to date (tag from docker-compose.yml)"
 
-# --- 5. usage-tracker proxy --------------------------------------------------
+# --- 6. usage-tracker proxy --------------------------------------------------
 Write-Step "usage-tracker proxy"
 Invoke-Compose @("build", "--pull", "usage-tracker")
 Write-Ok "Proxy image built"
 
-# --- 6. Model ----------------------------------------------------------------
+# --- 7. Model ----------------------------------------------------------------
 Write-Step "Model download"
 if ($SkipModel) {
     Write-Skip "Skipped (-SkipModel)"
@@ -283,22 +324,29 @@ if ($SkipModel) {
     Get-ModelFromHub -Repo $m.MmprojRepo -Include $m.MmprojInclude -DestFile $m.MmprojFile -Label "vision projector"
 }
 
-# --- 7. Firewall -------------------------------------------------------------
+# --- 8. Firewall -------------------------------------------------------------
 Write-Step "Windows Firewall"
 $ruleName = "LLM Server Port $ServerPort"
 if (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue) {
     Write-Skip "Rule '$ruleName' already exists"
 } else {
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
     try {
-        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP `
-            -LocalPort $ServerPort -Action Allow -Profile Any -Enabled True | Out-Null
-        Write-Ok "Opened inbound TCP $ServerPort"
+        $result = New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP `
+            -LocalPort $ServerPort -Action Allow -Profile Any -Enabled True 2>&1
+        if ($result -and -not ($result -match "Access is denied")) {
+            Write-Ok "Opened inbound TCP $ServerPort"
+        } else {
+            Write-Warn "Could not add rule (run as Administrator for LAN access)"
+        }
     } catch {
         Write-Warn "Could not add rule (run as Administrator for LAN access)"
+    } finally {
+        $ErrorActionPreference = $prevEap
     }
 }
 
-# --- 8. Cleanup --------------------------------------------------------------
+# --- 9. Cleanup --------------------------------------------------------------
 Write-Step "Docker cleanup"
 $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 try {
@@ -319,5 +367,7 @@ Write-Host "  .\run.ps1                     # start default ($($Models[$Model].L
 Write-Host "  .\run.ps1 -Model qwen35-9b    # lighter model" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Stop               # stop the server" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  API will be available at http://localhost:$ServerPort/v1" -ForegroundColor White
+Write-Host "  API:      http://localhost:$ServerPort/v1" -ForegroundColor White
+Write-Host "  API key:  $apiKey" -ForegroundColor White
+Write-Host "            (send as 'Authorization: Bearer <key>')" -ForegroundColor DarkGray
 Write-Host ""

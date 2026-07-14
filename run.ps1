@@ -357,7 +357,12 @@ Write-Host "  Local:  http://localhost:8899/v1" -ForegroundColor White
 Write-Host "  LAN:    http://${localIp}:8899/v1" -ForegroundColor White
 Write-Host ""
 Write-Host "  Reasoning: $(if ($Thinking) { 'on' } else { 'off' })    Vision: $(if ($enableVision) { 'on' } else { 'off' })    Context: $Context" -ForegroundColor Gray
-Write-Host "  API key:   any string (not validated)" -ForegroundColor Gray
+$apiKey = Get-DotEnvValue "LLAMA_API_KEY"
+if ($apiKey) {
+    Write-Host "  API key:   $apiKey" -ForegroundColor Gray
+} else {
+    Write-Host "  API key:   none (auth disabled - run .\setup.ps1 to generate one)" -ForegroundColor Gray
+}
 Write-Host ""
 Write-Host "  .\run.ps1 -Stop   stop     |   docker compose logs -f   logs" -ForegroundColor DarkGray
 

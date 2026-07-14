@@ -6,7 +6,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "options": {
         "baseURL": "http://127.0.0.1:8899/v1",
-        "apiKey": "sk-local",
+        "apiKey": "sk-REPLACE-WITH-LLAMA_API_KEY-FROM-DOTENV",
         "timeout": 300000,
         "chunkTimeout": 120000
       },

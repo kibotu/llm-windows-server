@@ -8,11 +8,14 @@ Two scripts, one Docker command, sensible defaults for **Qwen3.6-35B-A3B** with 
 ## Quick start
 
 ```powershell
-.\setup.ps1     # install Docker + hf CLI, pull image, download the model
+.\setup.ps1     # install Docker + hf CLI, generate API key, pull image, download model
 .\run.ps1       # start the server (stays in the foreground, streams logs)
 ```
 
-API endpoint: `http://localhost:8899/v1` · API key: any string (not validated).
+API endpoint: `http://localhost:8899/v1`
+
+`setup.ps1` generates a random **API key** into `.env` (`LLAMA_API_KEY`). Clients
+must send it as `Authorization: Bearer <key>`. `run.ps1` prints the key on startup.
 
 Put your Hugging Face token in `.env` first (copy `.env.example` to `.env`).
 
@@ -187,11 +190,23 @@ does, and why it's set the way it is. Values in **bold** are the defaults here.
 
 ## Client configuration
 
-Base URL: `http://<host-ip>:8899/v1` · API key: any string.
+Base URL: `http://<host-ip>:8899/v1`
+API key: the `LLAMA_API_KEY` value from your `.env` (sent as `Authorization: Bearer <key>`).
 
 Works with Cursor, Continue, the OpenAI SDK, and any OpenAI-compatible client.
 For secure remote access, install [Tailscale](https://tailscale.com) and use the
 Tailscale IP (`tailscale ip -4`).
+
+### Authentication
+
+The usage-tracker proxy validates every request against `LLAMA_API_KEY` (generated
+by `setup.ps1` into `.env`). Requests without a matching `Authorization: Bearer <key>`
+header get a `401`. `/health` stays open so probes keep working. Leaving
+`LLAMA_API_KEY` blank disables auth entirely (open server).
+
+```bash
+curl http://<host-ip>:8899/v1/models -H "Authorization: Bearer <your-key>"
+```
 
 ### OpenCode (e.g. from a Mac)
 
@@ -205,25 +220,30 @@ It exposes both models and points at the server through the usage-tracker proxy.
    cp opencode/opencode.json ~/.config/opencode/opencode.json
    ```
 
-2. Set the `baseURL` to reach the server:
+2. Set the `baseURL` and `apiKey`:
 
-   - **Same machine (Windows host):** leave it as `http://127.0.0.1:8899/v1`.
-   - **From a Mac / another device on the LAN:** use the host's IP, e.g.
-     `http://192.168.1.50:8899/v1` (the `run.ps1` banner prints the LAN URL).
-   - **Over Tailscale:** use the host's Tailscale IP, e.g. `http://100.x.y.z:8899/v1`.
+   - **baseURL** — how to reach the server:
+     - **Same machine (Windows host):** leave it as `http://127.0.0.1:8899/v1`.
+     - **From a Mac / another device on the LAN:** use the host's IP, e.g.
+       `http://192.168.1.50:8899/v1` (the `run.ps1` banner prints the LAN URL).
+     - **Over Tailscale:** use the host's Tailscale IP, e.g. `http://100.x.y.z:8899/v1`.
+   - **apiKey** — replace the placeholder with your `LLAMA_API_KEY` from `.env`
+     (the `run.ps1` banner prints it too).
 
    ```jsonc
    "options": {
      "baseURL": "http://<host-ip>:8899/v1",
-     "apiKey": "sk-local"          // any string; not validated
+     "apiKey": "sk-...your LLAMA_API_KEY from .env..."
    }
    ```
 
 3. Start OpenCode — it defaults to `llama-at-home/qwen36-35b`. Switch models with
    the model picker, or edit the `"model"` field.
 
-> The bundled config also sets sensible context limits, auto-compaction, and tool
-> permissions. Trim the `permission` / `mcp` blocks to taste — they're just a demo.
+> The shipped config uses a placeholder api key
+> (`sk-REPLACE-WITH-LLAMA_API_KEY-FROM-DOTENV`) — swap in your real key. It also
+> sets sensible context limits, auto-compaction, and tool permissions; trim the
+> `permission` / `mcp` blocks to taste, they're just a demo.
 
 ---
 
