@@ -6,6 +6,7 @@ Tracks token usage per request with per-day, per-session, and per-client aggrega
 
 import hmac
 import json
+import logging
 import os
 import threading
 from datetime import datetime, timedelta
@@ -527,6 +528,7 @@ def get_usage_history():
 
 
 if __name__ == "__main__":
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
     load_usage_data()
     print(f"Starting usage tracking proxy on http://0.0.0.0:8899")
     print(f"Forwarding to llama.cpp server at {LLAMA_SERVER_URL}")
