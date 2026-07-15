@@ -140,7 +140,8 @@ prunes old Docker layers. Idempotent — re-run it to update.
 ```
 client ──▶ usage-tracker (:8899) ──▶ llama.cpp server (:8888, GPU)
                  │
-                 └─ records token usage to usage_data.json
+                 ├─ requests.jsonl      append-only request log (survives restarts)
+                 └─ daily_summary.json  per-day + per-client aggregates
 ```
 
 - **`docker-compose.yml`** is the single source of truth for defaults and the image

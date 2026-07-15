@@ -25,4 +25,4 @@ Desktop.ini
 *.swp
 *.swo
 
-usage_data.json
+usage_data/

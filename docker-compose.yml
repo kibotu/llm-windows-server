@@ -75,6 +75,7 @@ services:
       # Cold load of a ~17 GB GGUF + CUDA kernel compile can take minutes on first start.
       start_period: 300s
 
+      #--kv-unified
     command: >-
       -m /models/${MODEL_FILE:-Qwen3.6-35B-A3B-UD-IQ4_XS.gguf}
       ${MMPROJ_FLAGS:-}
@@ -90,7 +91,6 @@ services:
       --flash-attn on
       --parallel ${N_PARALLEL:-1}
       --cont-batching
-      --kv-unified
       --reasoning ${REASONING:-on}
       --reasoning-preserve
       --jinja
@@ -115,7 +115,8 @@ services:
       - "host.docker.internal:host-gateway"
 
     volumes:
-      - ./usage_data.json:/data/usage_data.json:rw
+      # Directory mount — binding a single file creates a directory if missing.
+      - ./usage_data:/data:rw
 
     depends_on:
       llm:

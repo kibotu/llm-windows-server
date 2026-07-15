@@ -175,6 +175,26 @@ function Invoke-Compose {
     } finally { Pop-Location }
 }
 
+function Ensure-UsageDataStorage {
+    $dataDir = Join-Path $ScriptDir "usage_data"
+    $dataFile = Join-Path $dataDir "usage_data.json"
+    $legacyPath = Join-Path $ScriptDir "usage_data.json"
+
+    if (Test-Path $legacyPath -PathType Leaf) {
+        New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+        Move-Item -Force $legacyPath $dataFile
+    } elseif (Test-Path $legacyPath -PathType Container) {
+        Remove-Item -Recurse -Force $legacyPath
+    }
+
+    New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+    if (-not (Test-Path $dataFile) -and -not (Test-Path (Join-Path $dataDir "requests.jsonl"))) {
+        if (Test-Path $legacyPath -PathType Leaf) {
+            Move-Item -Force $legacyPath $dataFile
+        }
+    }
+}
+
 function Get-ModelFromHub {
     param([string]$Repo, [string]$Include, [string]$DestFile, [string]$Label)
 
@@ -310,6 +330,7 @@ Write-Ok "Image up to date (tag from docker-compose.yml)"
 
 # --- 6. usage-tracker proxy --------------------------------------------------
 Write-Step "usage-tracker proxy"
+Ensure-UsageDataStorage
 Invoke-Compose @("build", "--pull", "usage-tracker")
 Write-Ok "Proxy image built"
 

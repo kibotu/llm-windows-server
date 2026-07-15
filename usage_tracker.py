@@ -9,7 +9,7 @@ import json
 import os
 import threading
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 import requests
 from flask import Flask, request, Response, jsonify
 
@@ -18,8 +18,16 @@ app = Flask(__name__)
 LLAMA_SERVER_URL = os.environ.get("LLAMA_SERVER_URL", "http://llm:8888")
 # Bearer key clients must present. Empty string disables auth (open server).
 API_KEY = os.environ.get("LLAMA_API_KEY", "").strip()
-TRACKING_FILE = "/data/usage_data.json"
+TRACKING_DIR = "/data"
+REQUESTS_LOG = os.path.join(TRACKING_DIR, "requests.jsonl")
+SUMMARY_FILE = os.path.join(TRACKING_DIR, "daily_summary.json")
+LEGACY_FILE = os.path.join(TRACKING_DIR, "usage_data.json")
 SESSION_GAP_MINUTES = 30
+
+# Thread-safe data storage
+data_lock = threading.Lock()
+usage_data: Dict[str, List[Dict[str, Any]]] = {"requests": []}
+daily_summary: Dict[str, Any] = {"days": {}, "totals_by_client": {}}
 
 
 def is_authorized(req) -> bool:
@@ -34,48 +42,196 @@ def is_authorized(req) -> bool:
         provided = (req.headers.get("x-api-key") or req.headers.get("api-key") or "").strip()
     return bool(provided) and hmac.compare_digest(provided, API_KEY)
 
-# Thread-safe data storage
-data_lock = threading.Lock()
-usage_data: Dict[str, List[Dict[str, Any]]] = {"requests": []}
+
+def _empty_summary() -> Dict[str, Any]:
+    return {"days": {}, "totals_by_client": {}}
+
+
+def _token_totals() -> Dict[str, int]:
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "request_count": 0,
+    }
+
+
+def _ensure_tracking_storage() -> None:
+    """Ensure the tracking directory exists and storage files are usable."""
+    os.makedirs(TRACKING_DIR, exist_ok=True)
+    for path in (REQUESTS_LOG, SUMMARY_FILE, LEGACY_FILE):
+        if os.path.isdir(path):
+            raise RuntimeError(
+                f"{path} is a directory, not a file. "
+                "Remove it and mount ./usage_data as a directory (see docker-compose.yml)."
+            )
+    if not os.path.exists(REQUESTS_LOG):
+        open(REQUESTS_LOG, "a", encoding="utf-8").close()
+        print(f"Created empty request log at {REQUESTS_LOG}")
+    if not os.path.exists(SUMMARY_FILE):
+        _save_summary(_empty_summary())
+        print(f"Created empty summary at {SUMMARY_FILE}")
+
+
+def _load_summary() -> Dict[str, Any]:
+    try:
+        with open(SUMMARY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "days" in data and "totals_by_client" in data:
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"Error loading summary file: {e}")
+    return _empty_summary()
+
+
+def _save_summary(summary: Dict[str, Any]) -> None:
+    tmp_path = f"{SUMMARY_FILE}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    os.replace(tmp_path, SUMMARY_FILE)
+
+
+def _append_request_line(record: Dict[str, Any]) -> None:
+    line = json.dumps(record, separators=(",", ":"))
+    with open(REQUESTS_LOG, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def _load_requests_from_log() -> List[Dict[str, Any]]:
+    requests_list: List[Dict[str, Any]] = []
+    if not os.path.exists(REQUESTS_LOG):
+        return requests_list
+
+    with open(REQUESTS_LOG, "r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"Skipping malformed log line {line_no}: {e}")
+                continue
+            if isinstance(record, dict):
+                requests_list.append(record)
+    return requests_list
+
+
+def _migrate_legacy_file() -> None:
+    if not os.path.exists(LEGACY_FILE):
+        return
+
+    try:
+        with open(LEGACY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"Could not migrate legacy usage file: {e}")
+        return
+
+    legacy_requests = data.get("requests", []) if isinstance(data, dict) else []
+    if not legacy_requests:
+        return
+
+    existing = _load_requests_from_log()
+    if existing:
+        print("Legacy usage file present but request log already has data; skipping migration")
+        return
+
+    for record in legacy_requests:
+        if isinstance(record, dict):
+            _append_request_line(record)
+    migrated_path = f"{LEGACY_FILE}.migrated"
+    os.replace(LEGACY_FILE, migrated_path)
+    print(f"Migrated {len(legacy_requests)} requests from legacy usage_data.json to requests.jsonl")
+
+
+def _update_summary(record: Dict[str, Any]) -> None:
+    day = datetime.fromisoformat(record["ts"]).date().isoformat()
+    client_id = record["client_id"]
+
+    if day not in daily_summary["days"]:
+        daily_summary["days"][day] = {"total": _token_totals(), "by_client": {}}
+
+    day_entry = daily_summary["days"][day]
+    if client_id not in day_entry["by_client"]:
+        day_entry["by_client"][client_id] = _token_totals()
+    if client_id not in daily_summary["totals_by_client"]:
+        daily_summary["totals_by_client"][client_id] = _token_totals()
+
+    for bucket in (
+        day_entry["total"],
+        day_entry["by_client"][client_id],
+        daily_summary["totals_by_client"][client_id],
+    ):
+        bucket["prompt_tokens"] += record["prompt_tokens"]
+        bucket["completion_tokens"] += record["completion_tokens"]
+        bucket["total_tokens"] += record["total_tokens"]
+        bucket["request_count"] += 1
+
+
+def _rebuild_summary_from_requests(requests_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+    summary = _empty_summary()
+    for record in requests_list:
+        day = datetime.fromisoformat(record["ts"]).date().isoformat()
+        client_id = record["client_id"]
+
+        if day not in summary["days"]:
+            summary["days"][day] = {"total": _token_totals(), "by_client": {}}
+        day_entry = summary["days"][day]
+        if client_id not in day_entry["by_client"]:
+            day_entry["by_client"][client_id] = _token_totals()
+        if client_id not in summary["totals_by_client"]:
+            summary["totals_by_client"][client_id] = _token_totals()
+
+        for bucket in (
+            day_entry["total"],
+            day_entry["by_client"][client_id],
+            summary["totals_by_client"][client_id],
+        ):
+            bucket["prompt_tokens"] += record["prompt_tokens"]
+            bucket["completion_tokens"] += record["completion_tokens"]
+            bucket["total_tokens"] += record["total_tokens"]
+            bucket["request_count"] += 1
+    return summary
 
 
 def load_usage_data():
-    """Load usage data from disk."""
-    global usage_data
-    try:
-        with open(TRACKING_FILE, "r") as f:
-            data = json.load(f)
-            with data_lock:
-                usage_data = data if isinstance(data, dict) and "requests" in data else {"requests": []}
-        print(f"Loaded {len(usage_data['requests'])} requests from {TRACKING_FILE}")
-    except FileNotFoundError:
-        print(f"No existing usage data found at {TRACKING_FILE}, starting fresh")
-        with data_lock:
-            usage_data = {"requests": []}
-    except Exception as e:
-        print(f"Error loading usage data: {e}, starting fresh")
-        with data_lock:
-            usage_data = {"requests": []}
+    """Load persisted usage history and aggregated summaries."""
+    global usage_data, daily_summary
+    _ensure_tracking_storage()
+    _migrate_legacy_file()
+
+    requests_list = _load_requests_from_log()
+    summary = _load_summary()
+
+    if requests_list and not summary["days"] and not summary["totals_by_client"]:
+        print("Summary file empty; rebuilding aggregates from request log")
+        summary = _rebuild_summary_from_requests(requests_list)
+        _save_summary(summary)
+
+    with data_lock:
+        usage_data = {"requests": requests_list}
+        daily_summary = summary
+
+    print(
+        f"Loaded {len(requests_list)} requests from {REQUESTS_LOG} "
+        f"and {len(summary['days'])} day(s) of aggregates from {SUMMARY_FILE}"
+    )
 
 
-def save_usage_data():
-    """Save usage data to disk."""
-    try:
-        with data_lock:
-            data_copy = {"requests": usage_data["requests"][:]}
-        with open(TRACKING_FILE, "w") as f:
-            json.dump(data_copy, f, indent=2)
-        print(f"Saved {len(data_copy['requests'])} requests to {TRACKING_FILE}")
-    except Exception as e:
-        print(f"Error saving usage data: {e}")
+def persist_usage_record(record: Dict[str, Any]) -> None:
+    """Append one request and update persisted aggregates."""
+    _append_request_line(record)
+    _update_summary(record)
+    _save_summary(daily_summary)
 
 
 def extract_client_info(req) -> tuple[str, str, str]:
     """Extract IP, user agent, and client_id from request."""
-    # Determine IP address
     if req.headers.get("X-Forwarded-For"):
         ip_address = req.headers.get("X-Forwarded-For").split(",")[0].strip()
-        # If X-Forwarded-For is a private IP, use remote_addr instead
         if ip_address.startswith((
             "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.",
             "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.",
@@ -84,31 +240,31 @@ def extract_client_info(req) -> tuple[str, str, str]:
             ip_address = req.remote_addr or ip_address
     else:
         ip_address = req.remote_addr or "unknown"
-    
+
     user_agent = req.headers.get("User-Agent", "unknown")[:80]
     client_id = f"{ip_address}_{user_agent}" if user_agent != "unknown" else ip_address
-    
+
     return ip_address, user_agent, client_id
 
 
-def record_usage(client_id: str, ip: str, user_agent: str, path: str, 
+def record_usage(client_id: str, ip: str, user_agent: str, path: str,
                  response_data: Dict[str, Any], streaming: bool):
     """Record a single request's usage."""
     if "usage" not in response_data:
         print(f"[TRACK] No usage data in response for {path}")
         return
-    
+
     usage = response_data["usage"]
     prompt_tokens = usage.get("prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0)
     total_tokens = usage.get("total_tokens", 0)
-    
+
     if prompt_tokens == 0 and completion_tokens == 0:
         print(f"[TRACK] Zero tokens in response for {path}")
         return
-    
+
     model = response_data.get("model", "unknown")
-    
+
     record = {
         "ts": datetime.utcnow().isoformat(),
         "client_id": client_id,
@@ -119,13 +275,13 @@ def record_usage(client_id: str, ip: str, user_agent: str, path: str,
         "total_tokens": total_tokens,
         "model": model,
         "path": path,
-        "streaming": streaming
+        "streaming": streaming,
     }
-    
+
     with data_lock:
         usage_data["requests"].append(record)
-    
-    save_usage_data()
+        persist_usage_record(record)
+
     print(f"[TRACK] Recorded {total_tokens} tokens for {client_id} ({path}, streaming={streaming})")
 
 
@@ -140,6 +296,24 @@ def add_cors_headers(response):
     return response
 
 
+# Hop-by-hop headers from upstream must not be forwarded — Flask/Werkzeug sets
+# Transfer-Encoding itself for streamed bodies; copying upstream values causes
+# "Transfer-Encoding: chunked, chunked" and breaks strict clients (httpx/OpenAI SDK).
+_HOP_BY_HOP = frozenset({
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade",
+})
+
+
+def filter_proxy_headers(upstream_headers) -> Dict[str, str]:
+    """Return upstream headers safe to pass through the Flask proxy."""
+    return {
+        key: value
+        for key, value in upstream_headers.items()
+        if key.lower() not in _HOP_BY_HOP and key.lower() != "content-length"
+    }
+
+
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 def proxy(path):
@@ -148,7 +322,6 @@ def proxy(path):
         response = Response("")
         return add_cors_headers(response)
 
-    # API key check. Health probes stay open so container/LAN checks keep working.
     if path != "health" and not is_authorized(request):
         body = json.dumps({"error": {
             "message": "Invalid or missing API key",
@@ -159,75 +332,69 @@ def proxy(path):
         resp.headers["WWW-Authenticate"] = "Bearer"
         return add_cors_headers(resp)
 
-    # Block /usage paths from being proxied
     if path.startswith("usage"):
         return Response("Not Found", status=404)
-    
+
     print(f"[PROXY] {request.method} /{path} from {request.remote_addr}")
-    
+
     ip, user_agent, client_id = extract_client_info(request)
-    
+
     url = f"{LLAMA_SERVER_URL}/{path}"
     headers = {key: value for (key, value) in request.headers if key.lower() != "host"}
-    
+
     try:
-        # Forward request to llama.cpp
         if request.method == "GET":
             resp = requests.get(url, headers=headers, params=request.args, stream=True)
         elif request.method in ["POST", "PUT", "PATCH"]:
             method_func = getattr(requests, request.method.lower())
-            resp = method_func(url, headers=headers, data=request.get_data(), 
-                             params=request.args, stream=True)
+            resp = method_func(url, headers=headers, data=request.get_data(),
+                               params=request.args, stream=True)
         elif request.method == "DELETE":
-            resp = requests.delete(url, headers=headers, data=request.get_data(), 
-                                 params=request.args, stream=True)
+            resp = requests.delete(url, headers=headers, data=request.get_data(),
+                                   params=request.args, stream=True)
         else:
             return Response(f"Method {request.method} not allowed", status=405)
-        
-        # Handle streaming (SSE) responses
+
         if resp.headers.get("Content-Type", "").startswith("text/event-stream"):
             def generate():
                 buffer = ""
                 last_data = None
-                
+
                 for chunk in resp.iter_content(chunk_size=4096):
                     if chunk:
-                        # Immediately yield to client
                         yield chunk
-                        
-                        # Buffer for parsing
                         buffer += chunk.decode("utf-8", errors="replace")
-                        
-                        # Parse complete lines
                         while "\n" in buffer:
                             line, buffer = buffer.split("\n", 1)
                             line = line.strip()
-                            
                             if line.startswith("data: ") and line != "data: [DONE]":
                                 try:
                                     last_data = json.loads(line[6:])
                                 except json.JSONDecodeError:
                                     pass
-                
-                # Record usage from the last data chunk
+
                 if last_data:
                     record_usage(client_id, ip, user_agent, path, last_data, streaming=True)
-            
-            response = Response(generate(), status=resp.status_code, headers=dict(resp.headers))
+
+            response = Response(
+                generate(), status=resp.status_code,
+                headers=filter_proxy_headers(resp.headers),
+            )
             return add_cors_headers(response)
-        
-        # Handle non-streaming responses
-        else:
-            content = resp.content
-            try:
-                response_json = json.loads(content.decode("utf-8"))
-                record_usage(client_id, ip, user_agent, path, response_json, streaming=False)
-            except Exception as e:
-                print(f"[TRACK] Error parsing response: {e}")
-            
-            response = Response(content, status=resp.status_code, headers=dict(resp.headers))
-            return add_cors_headers(response)
-    
+
+        content = resp.content
+        try:
+            response_json = json.loads(content.decode("utf-8"))
+            record_usage(client_id, ip, user_agent, path, response_json, streaming=False)
+        except Exception as e:
+            print(f"[TRACK] Error parsing response: {e}")
+
+        response = Response(
+            content, status=resp.status_code,
+            headers=filter_proxy_headers(resp.headers),
+        )
+        return add_cors_headers(response)
+
     except requests.exceptions.RequestException as e:
         return Response(f"Error connecting to llama.cpp server: {str(e)}", status=502)
     except Exception as e:
@@ -238,19 +405,18 @@ def detect_sessions(requests_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     """Detect sessions from a list of requests (must be sorted by timestamp)."""
     if not requests_list:
         return []
-    
+
     sessions = []
     current_session = None
     session_gap = timedelta(minutes=SESSION_GAP_MINUTES)
-    
+
     for req in requests_list:
         ts = datetime.fromisoformat(req["ts"])
         client_id = req["client_id"]
-        
+
         if current_session is None or \
            client_id != current_session["client_id"] or \
            (ts - current_session["last_ts"]) > session_gap:
-            # Start new session
             if current_session:
                 sessions.append({
                     "client_id": current_session["client_id"],
@@ -259,9 +425,9 @@ def detect_sessions(requests_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                     "prompt_tokens": current_session["prompt_tokens"],
                     "completion_tokens": current_session["completion_tokens"],
                     "total_tokens": current_session["total_tokens"],
-                    "request_count": current_session["request_count"]
+                    "request_count": current_session["request_count"],
                 })
-            
+
             current_session = {
                 "client_id": client_id,
                 "start": ts,
@@ -269,17 +435,15 @@ def detect_sessions(requests_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                 "prompt_tokens": req["prompt_tokens"],
                 "completion_tokens": req["completion_tokens"],
                 "total_tokens": req["total_tokens"],
-                "request_count": 1
+                "request_count": 1,
             }
         else:
-            # Continue current session
             current_session["last_ts"] = ts
             current_session["prompt_tokens"] += req["prompt_tokens"]
             current_session["completion_tokens"] += req["completion_tokens"]
             current_session["total_tokens"] += req["total_tokens"]
             current_session["request_count"] += 1
-    
-    # Add final session
+
     if current_session:
         sessions.append({
             "client_id": current_session["client_id"],
@@ -288,9 +452,9 @@ def detect_sessions(requests_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             "prompt_tokens": current_session["prompt_tokens"],
             "completion_tokens": current_session["completion_tokens"],
             "total_tokens": current_session["total_tokens"],
-            "request_count": current_session["request_count"]
+            "request_count": current_session["request_count"],
         })
-    
+
     return sessions
 
 
@@ -301,64 +465,45 @@ def get_usage():
     if request.method == "OPTIONS":
         response = Response("")
         return add_cors_headers(response)
-    
+
     today = datetime.utcnow().date().isoformat()
-    
+
     with data_lock:
         requests_copy = usage_data["requests"][:]
-    
-    # Filter today's requests
+        today_summary = daily_summary["days"].get(today)
+
     today_requests = [
-        r for r in requests_copy 
+        r for r in requests_copy
         if datetime.fromisoformat(r["ts"]).date().isoformat() == today
     ]
-    
-    # Sort by timestamp for session detection
     today_requests.sort(key=lambda r: r["ts"])
-    
-    # Aggregate by client
-    by_client = {}
-    total_prompt = 0
-    total_completion = 0
-    total_tokens = 0
-    total_requests = 0
-    
-    for req in today_requests:
-        client_id = req["client_id"]
-        
-        if client_id not in by_client:
-            by_client[client_id] = {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "request_count": 0
-            }
-        
-        by_client[client_id]["prompt_tokens"] += req["prompt_tokens"]
-        by_client[client_id]["completion_tokens"] += req["completion_tokens"]
-        by_client[client_id]["total_tokens"] += req["total_tokens"]
-        by_client[client_id]["request_count"] += 1
-        
-        total_prompt += req["prompt_tokens"]
-        total_completion += req["completion_tokens"]
-        total_tokens += req["total_tokens"]
-        total_requests += 1
-    
-    # Detect sessions
-    sessions = detect_sessions(today_requests)
-    
-    result = {
-        "date": today,
-        "total": {
-            "prompt_tokens": total_prompt,
-            "completion_tokens": total_completion,
-            "total_tokens": total_tokens,
-            "request_count": total_requests
-        },
-        "by_client": by_client,
-        "sessions": sessions
-    }
-    
+
+    if today_summary:
+        result = {
+            "date": today,
+            "total": today_summary["total"],
+            "by_client": today_summary["by_client"],
+            "sessions": detect_sessions(today_requests),
+        }
+    else:
+        by_client = {}
+        total = _token_totals()
+        for req in today_requests:
+            client_id = req["client_id"]
+            if client_id not in by_client:
+                by_client[client_id] = _token_totals()
+            for bucket in (by_client[client_id], total):
+                bucket["prompt_tokens"] += req["prompt_tokens"]
+                bucket["completion_tokens"] += req["completion_tokens"]
+                bucket["total_tokens"] += req["total_tokens"]
+                bucket["request_count"] += 1
+        result = {
+            "date": today,
+            "total": total,
+            "by_client": by_client,
+            "sessions": detect_sessions(today_requests),
+        }
+
     response = jsonify(result)
     return add_cors_headers(response)
 
@@ -370,68 +515,14 @@ def get_usage_history():
     if request.method == "OPTIONS":
         response = Response("")
         return add_cors_headers(response)
-    
+
     with data_lock:
-        requests_copy = usage_data["requests"][:]
-    
-    # Aggregate by day
-    days = {}
-    totals_by_client = {}
-    
-    for req in requests_copy:
-        day = datetime.fromisoformat(req["ts"]).date().isoformat()
-        client_id = req["client_id"]
-        
-        # Per-day aggregation
-        if day not in days:
-            days[day] = {
-                "total": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                    "request_count": 0
-                },
-                "by_client": {}
-            }
-        
-        if client_id not in days[day]["by_client"]:
-            days[day]["by_client"][client_id] = {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "request_count": 0
-            }
-        
-        days[day]["by_client"][client_id]["prompt_tokens"] += req["prompt_tokens"]
-        days[day]["by_client"][client_id]["completion_tokens"] += req["completion_tokens"]
-        days[day]["by_client"][client_id]["total_tokens"] += req["total_tokens"]
-        days[day]["by_client"][client_id]["request_count"] += 1
-        
-        days[day]["total"]["prompt_tokens"] += req["prompt_tokens"]
-        days[day]["total"]["completion_tokens"] += req["completion_tokens"]
-        days[day]["total"]["total_tokens"] += req["total_tokens"]
-        days[day]["total"]["request_count"] += 1
-        
-        # All-time per-client totals
-        if client_id not in totals_by_client:
-            totals_by_client[client_id] = {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "request_count": 0
-            }
-        
-        totals_by_client[client_id]["prompt_tokens"] += req["prompt_tokens"]
-        totals_by_client[client_id]["completion_tokens"] += req["completion_tokens"]
-        totals_by_client[client_id]["total_tokens"] += req["total_tokens"]
-        totals_by_client[client_id]["request_count"] += 1
-    
-    result = {
-        "days": days,
-        "totals_by_client": totals_by_client
-    }
-    
-    response = jsonify(result)
+        summary_copy = {
+            "days": json.loads(json.dumps(daily_summary["days"])),
+            "totals_by_client": json.loads(json.dumps(daily_summary["totals_by_client"])),
+        }
+
+    response = jsonify(summary_copy)
     return add_cors_headers(response)
 
 
@@ -441,5 +532,5 @@ if __name__ == "__main__":
     print(f"Forwarding to llama.cpp server at {LLAMA_SERVER_URL}")
     print(f"Session gap: {SESSION_GAP_MINUTES} minutes")
     print(f"API key auth: {'ENABLED' if API_KEY else 'disabled (open server)'}")
-    
+
     app.run(host="0.0.0.0", port=8899, debug=False, threaded=True)

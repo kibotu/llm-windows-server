@@ -147,6 +147,27 @@ function Write-Step {
     Write-Host $Msg -ForegroundColor White
 }
 function Write-Ok   { param([string]$m) Write-Host "        [ok]   $m" -ForegroundColor Green }
+
+function Ensure-UsageDataStorage {
+    $dataDir = Join-Path $ScriptDir "usage_data"
+    $dataFile = Join-Path $dataDir "usage_data.json"
+    $legacyPath = Join-Path $ScriptDir "usage_data.json"
+
+    if (Test-Path $legacyPath -PathType Leaf) {
+        New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+        Move-Item -Force $legacyPath $dataFile
+    } elseif (Test-Path $legacyPath -PathType Container) {
+        Remove-Item -Recurse -Force $legacyPath
+    }
+
+    New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+    # Legacy single-file store is migrated by usage_tracker on startup.
+    if (-not (Test-Path $dataFile) -and -not (Test-Path (Join-Path $dataDir "requests.jsonl"))) {
+        if (Test-Path $legacyPath -PathType Leaf) {
+            Move-Item -Force $legacyPath $dataFile
+        }
+    }
+}
 function Write-Skip { param([string]$m) Write-Host "        [skip] $m" -ForegroundColor DarkGray }
 function Write-Info { param([string]$m) Write-Host "        [..]   $m" -ForegroundColor Gray }
 function Write-Warn { param([string]$m) Write-Host "        [warn] $m" -ForegroundColor Yellow }
@@ -324,6 +345,7 @@ Write-Ok "Environment set"
 
 # --- 4. Start / reconcile ----------------------------------------------------
 Write-Step "Starting server"
+Ensure-UsageDataStorage
 $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 try {
     $out = docker compose -f $ComposeFile up -d 2>&1
