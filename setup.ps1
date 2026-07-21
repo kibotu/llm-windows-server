@@ -208,21 +208,23 @@ function Get-ModelFromHub {
     Write-Info "Downloading $Label from $Repo ..."
     $hf = Get-HfCommand
     $tmp = Join-Path $env:TEMP ("hf_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
-    $env:HF_HUB_ENABLE_HF_TRANSFER = "1"
+    $env:PYTHONIOENCODING = "utf-8"
+    $env:PYTHONUTF8 = "1"
+    $env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
+    Remove-Item Env:HF_HUB_ENABLE_HF_TRANSFER -ErrorAction SilentlyContinue
 
-    & $hf.Name download $Repo --include $Include --local-dir $tmp
-    if ($LASTEXITCODE -ne 0) {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-        throw "Download failed for $Repo (pattern $Include)"
-    }
+    & $hf.Name download $Repo --include $Include --local-dir $tmp 2>&1 | Out-Null
+    $dlExit = $LASTEXITCODE
 
-    $file = Get-ChildItem $tmp -Recurse -File |
+    $file = Get-ChildItem $tmp -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like $DestFile } | Select-Object -First 1
     if (-not $file) {
-        $file = Get-ChildItem $tmp -Recurse -File -Filter "*.gguf" | Select-Object -First 1
+        $file = Get-ChildItem $tmp -Recurse -File -Filter "*.gguf" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
     }
     if (-not $file) {
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        if ($dlExit -ne 0) { throw "Download failed for $Repo (pattern $Include)" }
         throw "No matching file found in download for $Label"
     }
 

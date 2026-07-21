@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "llm-server": {
+      "command": "python",
+      "args": ["D:/llm-server/mcp/server.py"],
+      "env": {
+        "LLM_SERVER_URL": "http://127.0.0.1:8899",
+        "LLAMA_ADMIN_KEY": "sk-your-admin-or-inference-key"
+      }
+    }
+  }
+}

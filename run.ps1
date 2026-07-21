@@ -51,12 +51,17 @@
 .PARAMETER Stop
     Stop the server and exit.
 
+.PARAMETER NoFollow
+    Reconcile the container and wait for health, then exit without streaming logs.
+    Used by host_controller.py for remote model switches.
+
 .EXAMPLE
     .\run.ps1                            # Qwen3.6 35B, vision + reasoning, 262k ctx
     .\run.ps1 -Model qwen35-9b           # lighter 9B model
     .\run.ps1 -Context 65536 -Parallel 4 # 4 slots, shorter context (reconciles live)
     .\run.ps1 -KvCache q4_0              # save VRAM
     .\run.ps1 -Stop                      # stop the server
+    .\run.ps1 -Model qwen35-9b -NoFollow # reconcile only (for host_controller / admin API)
 #>
 
 [CmdletBinding()]
@@ -89,13 +94,20 @@ param(
 
     [switch]$NoDownload,
 
-    [switch]$Stop
+    [switch]$Stop,
+
+    [switch]$NoFollow
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $ComposeFile = Join-Path $ScriptDir "docker-compose.yml"
-try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch { }
+try {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+    $OutputEncoding = [System.Text.UTF8Encoding]::new()
+} catch { }
+$env:PYTHONIOENCODING = "utf-8"
+$env:PYTHONUTF8 = "1"
 
 # =============================================================================
 # MODEL CATALOG (must match setup.ps1)
@@ -211,6 +223,114 @@ function Start-DockerDesktop {
     return $false
 }
 
+function Write-RuntimeState {
+    param(
+        [string]$Status,
+        [hashtable]$Reg,
+        [int]$Context,
+        [bool]$Thinking,
+        [bool]$EnableVision,
+        [string]$ErrorMessage = ""
+    )
+    $stateDir = Join-Path $ScriptDir "usage_data"
+    New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+    $state = [ordered]@{
+        status      = $Status
+        model       = $Model
+        label       = $Reg.Label
+        model_file  = $Reg.File
+        context     = $Context
+        thinking    = $Thinking
+        vision      = $EnableVision
+        updated_at  = (Get-Date).ToUniversalTime().ToString("o")
+    }
+    if ($ErrorMessage) { $state.error = $ErrorMessage }
+    $statePath = Join-Path $stateDir "runtime_state.json"
+    $tmpPath = "$statePath.tmp"
+    $json = $state | ConvertTo-Json -Depth 4
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
+    Move-Item -Force $tmpPath $statePath
+}
+
+function Test-LlmHealthy {
+    # Probe /health inside the container so we detect readiness as soon as
+    # llama-server responds, without waiting for Docker's healthcheck tick.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $null = docker exec llm-server curl -sf http://localhost:8888/health 2>$null
+        if ($LASTEXITCODE -eq 0) { return $true }
+        $status = docker inspect --format '{{.State.Health.Status}}' llm-server 2>$null
+        return $status -eq "healthy"
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+}
+
+function Wait-LlmHealthy {
+    param([int]$TimeoutSec = 300)
+    if (Test-LlmHealthy) { return $true }
+
+    Write-Info "Loading model into GPU/RAM (cold start can take several minutes)..."
+    Write-Info "Live logs: docker compose -f `"$ComposeFile`" logs -f llm"
+
+    $start = Get-Date
+    $lastLogAt = [datetime]::MinValue
+    $lastLogLine = ""
+
+    while ($true) {
+        if (Test-LlmHealthy) { return $true }
+        if (((Get-Date) - $start).TotalSeconds -gt $TimeoutSec) { return $false }
+
+        $now = Get-Date
+        if (($now - $lastLogAt).TotalSeconds -ge 15) {
+            $lastLogAt = $now
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                $line = docker compose -f $ComposeFile logs --tail 1 llm 2>$null | Select-Object -Last 1
+                if ($line -and $line.Trim() -ne $lastLogLine) {
+                    $lastLogLine = $line.Trim()
+                    Write-Host ""
+                    Write-Info $lastLogLine
+                }
+            } finally {
+                $ErrorActionPreference = $prevEap
+            }
+        }
+
+        Start-Sleep -Seconds 1
+        Write-Host "." -NoNewline -ForegroundColor DarkGray
+    }
+}
+
+function Ensure-HostController {
+    $port = 8900
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -UseBasicParsing -TimeoutSec 2
+        if ($resp.StatusCode -eq 200) { return }
+    } catch { }
+
+    $controller = Join-Path $ScriptDir "host_controller.py"
+    if (-not (Test-Path $controller)) { return }
+
+    Write-Info "Starting host controller on http://127.0.0.1:$port ..."
+    Start-Process -FilePath "python" -ArgumentList @($controller) -WorkingDirectory $ScriptDir -WindowStyle Hidden
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        try {
+            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -UseBasicParsing -TimeoutSec 2
+            if ($resp.StatusCode -eq 200) {
+                Write-Ok "Host controller ready (remote model switching enabled)"
+                return
+            }
+        } catch { }
+    }
+    Write-Warn "Host controller did not start; remote /admin/reconcile will be unavailable"
+}
+
 function Get-LocalIp {
     $adapters = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.IPAddress -notlike "169.254.*" -and $_.IPAddress -notlike "127.*" -and $_.PrefixOrigin -ne "WellKnown" })
@@ -222,6 +342,13 @@ function Get-LocalIp {
     return $adapters[0].IPAddress
 }
 
+function Set-HfDownloadEnvironment {
+    $env:PYTHONIOENCODING = "utf-8"
+    $env:PYTHONUTF8 = "1"
+    $env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
+    Remove-Item Env:HF_HUB_ENABLE_HF_TRANSFER -ErrorAction SilentlyContinue
+}
+
 function Get-ModelFromHub {
     param([string]$Repo, [string]$Include, [string]$DestFile, [string]$Label)
     Write-Info "Downloading $Label from $Repo ..."
@@ -231,18 +358,21 @@ function Get-ModelFromHub {
 
     $token = Get-DotEnvValue "HF_TOKEN"
     if ($token -and $token -ne "hf_xxx" -and -not $env:HF_TOKEN) { $env:HF_TOKEN = $token }
-    $env:HF_HUB_ENABLE_HF_TRANSFER = "1"
+    Set-HfDownloadEnvironment
 
     $tmp = Join-Path $env:TEMP ("hf_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
-    & $hf.Name download $Repo --include $Include --local-dir $tmp
-    if ($LASTEXITCODE -ne 0) {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-        throw "Download failed for $Repo (pattern $Include)"
+    & $hf.Name download $Repo --include $Include --local-dir $tmp 2>&1 | Out-Null
+    $dlExit = $LASTEXITCODE
+
+    $file = Get-ChildItem $tmp -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like $DestFile } | Select-Object -First 1
+    if (-not $file) {
+        $file = Get-ChildItem $tmp -Recurse -File -Filter "*.gguf" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
     }
-    $file = Get-ChildItem $tmp -Recurse -File | Where-Object { $_.Name -like $DestFile } | Select-Object -First 1
-    if (-not $file) { $file = Get-ChildItem $tmp -Recurse -File -Filter "*.gguf" | Select-Object -First 1 }
     if (-not $file) {
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        if ($dlExit -ne 0) { throw "Download failed for $Repo (pattern $Include)" }
         throw "No matching file in download for $Label"
     }
     Move-Item $file.FullName (Join-Path $ScriptDir "models\$DestFile") -Force
@@ -346,30 +476,28 @@ Write-Ok "Environment set"
 # --- 4. Start / reconcile ----------------------------------------------------
 Write-Step "Starting server"
 Ensure-UsageDataStorage
+Ensure-HostController
 $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 try {
     $out = docker compose -f $ComposeFile up -d 2>&1
     $exit = $LASTEXITCODE
 } finally { $ErrorActionPreference = $prevEap }
 $out | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
-if ($exit -ne 0) { Write-Err "docker compose up failed (exit $exit)"; exit 1 }
+if ($exit -ne 0) { Write-Err "docker compose up failed (exit $exit)"; Write-RuntimeState -Status "failed" -Reg $reg -Context $Context -Thinking $Thinking -EnableVision $enableVision -ErrorMessage "docker compose up failed (exit $exit)"; exit 1 }
 Write-Ok "Container reconciled"
 
 # --- 5. Wait for health ------------------------------------------------------
 Write-Step "Waiting for health"
 $timeout = 300
-$start = Get-Date
-while ($true) {
-    $health = docker inspect --format '{{.State.Health.Status}}' llm-server 2>$null
-    if ($health -eq "healthy") { Write-Host ""; Write-Ok "Server is ready"; break }
-    if (((Get-Date) - $start).TotalSeconds -gt $timeout) {
-        Write-Host ""
-        Write-Err "Not healthy within ${timeout}s. Check: docker compose logs llm"
-        exit 1
-    }
-    Start-Sleep -Seconds 3
-    Write-Host "." -NoNewline -ForegroundColor DarkGray
+if (-not (Wait-LlmHealthy -TimeoutSec $timeout)) {
+    Write-Host ""
+    Write-Err "Not healthy within ${timeout}s. Check: docker compose logs llm"
+    Write-RuntimeState -Status "failed" -Reg $reg -Context $Context -Thinking $Thinking -EnableVision $enableVision -ErrorMessage "Health check timed out after ${timeout}s"
+    exit 1
 }
+Write-Host ""
+Write-Ok "Server is ready"
+Write-RuntimeState -Status "ready" -Reg $reg -Context $Context -Thinking $Thinking -EnableVision $enableVision
 
 # --- Banner ------------------------------------------------------------------
 $localIp = Get-LocalIp
@@ -387,6 +515,11 @@ if ($apiKey) {
 }
 Write-Host ""
 Write-Host "  .\run.ps1 -Stop   stop     |   docker compose logs -f   logs" -ForegroundColor DarkGray
+Write-Host "  POST /admin/reconcile on :8899  remote model switch (via host controller)" -ForegroundColor DarkGray
+
+if ($NoFollow) {
+    exit 0
+}
 
 # --- Stream logs (foreground) ------------------------------------------------
 Write-Host ""

@@ -63,6 +63,87 @@ exposes both models and points at the server through the proxy.
 The shipped config also sets sensible context limits, auto-compaction, and tool
 permissions; trim the `permission` / `mcp` blocks to taste — they're just a demo.
 
+## Remote model switching (Hermes / MCP)
+
+The server loads **one model at a time**. Switching from a remote client (Pi,
+Cursor, etc.) uses the admin API on the same `:8899` port:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/status` | GET | Current model, llama health, reconcile job |
+| `/admin/models` | GET | Available aliases (`qwen36`, `qwen35-9b`) |
+| `/admin/reconcile` | POST | Switch model (re-runs `run.ps1` on the host) |
+
+Auth: `Authorization: Bearer <LLAMA_ADMIN_KEY>` (defaults to `LLAMA_API_KEY`).
+
+```bash
+# Switch to the lighter 9B model from your Pi
+curl -X POST http://<host-ip>:8899/admin/reconcile \
+  -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen35-9b","cancel":true}'
+
+# Poll until ready
+curl http://<host-ip>:8899/admin/status -H "Authorization: Bearer <key>"
+```
+
+Architecture:
+
+```
+client ──▶ usage-tracker :8899 /admin/* ──▶ host_controller.py :8900 (Windows host)
+                                                    │
+                                                    └── run.ps1 -NoFollow -Model …
+```
+
+`host_controller.py` runs on the Windows host (auto-started by `run.ps1`). It
+cancels any in-flight reconcile and starts a new one. A new reconcile recreates
+the llama container with the requested GGUF.
+
+### MCP (Cursor / agents)
+
+```powershell
+pip install -r mcp/requirements.txt
+```
+
+Add to Cursor MCP config (see `mcp/cursor-mcp.example.json`):
+
+```json
+{
+  "mcpServers": {
+    "llm-server": {
+      "command": "python",
+      "args": ["D:/llm-server/mcp/server.py"],
+      "env": {
+        "LLM_SERVER_URL": "http://<host-ip>:8899",
+        "LLAMA_ADMIN_KEY": "sk-..."
+      }
+    }
+  }
+}
+```
+
+Tools: `list_models`, `get_server_status`, `switch_model`.
+
+On the Pi, point `LLM_SERVER_URL` at your Tailscale/LAN IP. After switching,
+tell Hermes `/model small` or `/model big` to match.
+
+### Shell scripts (Windows)
+
+Reads `LLAMA_API_KEY` / `LLAMA_ADMIN_KEY` from the repo `.env` automatically.
+
+```powershell
+.\scripts\llm-status.ps1          # current model
+.\scripts\switch-to-9b.ps1        # switch to Qwen3.5-9B (returns immediately)
+.\scripts\switch-to-35b.ps1       # switch to Qwen3.6-35B (returns immediately)
+.\scripts\llm-status.ps1 -Json    # raw admin/status JSON
+
+# Block until the reload finishes (can take several minutes):
+.\scripts\switch-to-9b.ps1 -Wait
+```
+
+These call the same `/admin/*` API as the MCP server (no MCP runtime needed).
+The server must be running (`.\run.ps1`) so `host_controller.py` is available.
+
 ## Models
 
 | Alias | Model | Size | Vision | Notes |
