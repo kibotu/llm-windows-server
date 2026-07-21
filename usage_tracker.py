@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
 import requests
@@ -28,6 +29,22 @@ SUMMARY_FILE = os.path.join(TRACKING_DIR, "daily_summary.json")
 LEGACY_FILE = os.path.join(TRACKING_DIR, "usage_data.json")
 RUNTIME_STATE_FILE = os.path.join(TRACKING_DIR, "runtime_state.json")
 SESSION_GAP_MINUTES = 30
+
+# Must match host_controller.py MODEL_CATALOG (used when admin API is unreachable).
+SWITCHABLE_MODELS: Dict[str, Dict[str, Any]] = {
+    "qwen36": {
+        "model_file": "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
+        "default_context": 262144,
+    },
+    "heretic": {
+        "model_file": "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf",
+        "default_context": 262144,
+    },
+    "qwen35-9b": {
+        "model_file": "Qwen3.5-9B-Q4_K_M.gguf",
+        "default_context": 128000,
+    },
+}
 
 # Thread-safe data storage
 data_lock = threading.Lock()
@@ -351,6 +368,75 @@ def _llm_health() -> Dict[str, Any]:
         return {"healthy": False, "error": str(exc)}
 
 
+def _model_path(model_file: str) -> str:
+    if model_file.startswith("/models/"):
+        return model_file
+    return f"/models/{model_file}"
+
+
+def _fetch_switchable_models() -> List[Dict[str, Any]]:
+    try:
+        headers: Dict[str, str] = {}
+        if ADMIN_KEY:
+            headers["Authorization"] = f"Bearer {ADMIN_KEY}"
+        resp = requests.get(f"{HOST_CONTROLLER_URL}/admin/models", headers=headers, timeout=5)
+        if resp.ok:
+            models = resp.json().get("models", [])
+            if isinstance(models, list) and models:
+                return models
+    except Exception as exc:
+        print(f"[MODELS] admin/models unavailable: {exc}")
+    return [{"id": model_id, **meta} for model_id, meta in SWITCHABLE_MODELS.items()]
+
+
+def _enrich_v1_models(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Advertise all switchable GGUFs so Hermes /model validation passes before a reload."""
+    catalog = _fetch_switchable_models()
+    data = list(payload.get("data") or [])
+    existing_ids = {item.get("id") for item in data if isinstance(item, dict)}
+
+    now = int(time.time())
+    for entry in catalog:
+        model_file = entry.get("model_file") or ""
+        model_id = _model_path(model_file)
+        if not model_id or model_id in existing_ids:
+            continue
+        ctx = int(entry.get("default_context") or 262144)
+        data.append({
+            "id": model_id,
+            "object": "model",
+            "created": now,
+            "owned_by": "llamacpp",
+            "meta": {"n_ctx": ctx, "n_ctx_train": ctx},
+        })
+        existing_ids.add(model_id)
+
+    payload["data"] = data
+
+    models = list(payload.get("models") or [])
+    existing_names = {
+        (m.get("name") or m.get("model"))
+        for m in models
+        if isinstance(m, dict)
+    }
+    for entry in catalog:
+        model_file = entry.get("model_file") or ""
+        model_id = _model_path(model_file)
+        if not model_id or model_id in existing_names:
+            continue
+        models.append({
+            "name": model_id,
+            "model": model_id,
+            "type": "model",
+            "capabilities": ["completion", "multimodal"],
+            "details": {"format": "gguf"},
+        })
+        existing_names.add(model_id)
+
+    payload["models"] = models
+    return payload
+
+
 def _admin_auth_headers(req) -> Dict[str, str]:
     headers = {}
     auth = req.headers.get("Authorization")
@@ -544,6 +630,9 @@ def proxy(path):
         content = resp.content
         try:
             response_json = json.loads(content.decode("utf-8"))
+            if request.method == "GET" and path.rstrip("/") == "v1/models":
+                response_json = _enrich_v1_models(response_json)
+                content = json.dumps(response_json).encode("utf-8")
             record_usage(client_id, ip, user_agent, path, response_json, streaming=False)
         except Exception as e:
             print(f"[TRACK] Error parsing response: {e}")
