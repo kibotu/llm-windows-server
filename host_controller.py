@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUN_PS1 = SCRIPT_DIR / "run.ps1"
 RUNTIME_STATE_FILE = SCRIPT_DIR / "usage_data" / "runtime_state.json"
-VALID_MODELS = frozenset({"qwen36", "qwen35-9b"})
+VALID_MODELS = frozenset({"qwen36", "heretic", "qwen35-9b"})
 BIND_HOST = os.environ.get("HOST_CONTROLLER_BIND", "127.0.0.1")
 BIND_PORT = int(os.environ.get("HOST_CONTROLLER_PORT", "8900"))
 
@@ -63,6 +63,11 @@ MODEL_CATALOG: dict[str, dict[str, Any]] = {
     "qwen36": {
         "label": "Qwen3.6-35B-A3B IQ4_XS (vision, MoE)",
         "model_file": "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
+        "default_context": 262144,
+    },
+    "heretic": {
+        "label": "Qwen3.6-35B-A3B Heretic Cerebellum 14GB (vision, MoE)",
+        "model_file": "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf",
         "default_context": 262144,
     },
     "qwen35-9b": {
@@ -259,10 +264,12 @@ class ReconcileManager:
                     "params": self._job.get("params"),
                     "error": tail or f"run.ps1 exited with code {exit_code}",
                 }
+                prev = _read_runtime_state()
                 _write_runtime_state(
                     {
+                        **prev,
                         "status": "failed",
-                        "model": self._job.get("model"),
+                        "model": self._job.get("model") or prev.get("model"),
                         "finished_at": finished_at,
                         "error": self._job["error"],
                     }

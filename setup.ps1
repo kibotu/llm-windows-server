@@ -17,7 +17,7 @@
       9. Cleanup               prune dangling Docker layers (models untouched)
 
 .PARAMETER Model
-    Which model to ensure is downloaded: "qwen36" (default) or "qwen35-9b".
+    Which model to ensure is downloaded: "qwen36" (default), "heretic", or "qwen35-9b".
 
 .PARAMETER SkipModel
     Skip the model download step (just refresh Docker + tooling).
@@ -27,6 +27,7 @@
 
 .EXAMPLE
     .\setup.ps1                     # full setup / update with the default model
+    .\setup.ps1 -Model heretic      # also fetch the Heretic Cerebellum 14GB model
     .\setup.ps1 -Model qwen35-9b    # also fetch the lighter 9B model
     .\setup.ps1 -SkipModel          # update Docker + tooling only
     .\setup.ps1 -Clean              # update and reclaim disk aggressively
@@ -34,7 +35,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("qwen36", "qwen35-9b")]
+    [ValidateSet("qwen36", "heretic", "qwen35-9b")]
     [string]$Model = "qwen36",
 
     [switch]$SkipModel,
@@ -61,6 +62,15 @@ $Models = @{
         MmprojFile    = "Qwen3.6-35B-A3B-mmproj-BF16.gguf"
         MmprojInclude = "*mmproj-BF16*"
         Label         = "Qwen3.6-35B-A3B IQ4_XS (vision, MoE, ~17 GB)"
+    }
+    "heretic" = @{
+        Repo          = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
+        File          = "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf"
+        Include       = "*Heretic-Cerebellum-14GB*"
+        MmprojRepo    = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
+        MmprojFile    = "Qwen3.6-35B-A3B-uncensored-heretic-mmproj-BF16.gguf"
+        MmprojInclude = "*heretic-mmproj-BF16*"
+        Label         = "Qwen3.6-35B-A3B Heretic Cerebellum 14GB (vision, MoE, ~14.5 GB)"
     }
     "qwen35-9b" = @{
         Repo          = "unsloth/Qwen3.5-9B-GGUF"
@@ -293,7 +303,12 @@ Write-Info "Ensuring latest 'hf' CLI (huggingface_hub + hf_transfer)..."
 python -m pip install --quiet --upgrade huggingface_hub hf_transfer
 $hf = Get-HfCommand
 if (-not $hf) { Write-Err "'hf' CLI still not on PATH after install."; exit 1 }
-$hfVersion = (& $hf.Name version 2>&1 | Out-String).Trim()
+$prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+try {
+    $hfVersion = (& $hf.Name version 2>&1 | Out-String).Trim()
+} finally {
+    $ErrorActionPreference = $prevEap
+}
 Write-Ok "hf ready ($hfVersion)"
 
 $token = Get-DotEnvValue "HF_TOKEN"
@@ -387,6 +402,7 @@ Write-Ok "Cleanup done"
 Write-Banner "Setup complete" "Start the server below"
 Write-Host ""
 Write-Host "  .\run.ps1                     # start default ($($Models[$Model].Label))" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model heretic      # Heretic Cerebellum 14GB" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model qwen35-9b    # lighter model" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Stop               # stop the server" -ForegroundColor Gray
 Write-Host ""

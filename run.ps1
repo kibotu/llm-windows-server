@@ -13,7 +13,8 @@
     at IQ4_XS with vision, reasoning, and MoE experts offloaded to RAM.
 
 .PARAMETER Model
-    "qwen36" (default, 35B MoE + vision) or "qwen35-9b" (lighter dense + vision).
+    "qwen36" (default, 35B MoE + vision), "heretic" (35B Heretic Cerebellum 14GB MoE + vision),
+    or "qwen35-9b" (lighter dense + vision).
 
 .PARAMETER Context
     Total KV context tokens (default: 262144).
@@ -57,6 +58,7 @@
 
 .EXAMPLE
     .\run.ps1                            # Qwen3.6 35B, vision + reasoning, 262k ctx
+    .\run.ps1 -Model heretic             # Heretic Cerebellum 14GB MoE + vision
     .\run.ps1 -Model qwen35-9b           # lighter 9B model
     .\run.ps1 -Context 65536 -Parallel 4 # 4 slots, shorter context (reconciles live)
     .\run.ps1 -KvCache q4_0              # save VRAM
@@ -66,7 +68,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("qwen36", "qwen35-9b")]
+    [ValidateSet("qwen36", "heretic", "qwen35-9b")]
     [string]$Model = "qwen36",
 
     [int]$Context = 262144,
@@ -122,6 +124,16 @@ $Models = @{
         MmprojInclude = "*mmproj-BF16*"
         IsMoe         = $true
         Label         = "Qwen3.6-35B-A3B IQ4_XS (vision, MoE)"
+    }
+    "heretic" = @{
+        Repo          = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
+        File          = "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf"
+        Include       = "*Heretic-Cerebellum-14GB*"
+        MmprojRepo    = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
+        MmprojFile    = "Qwen3.6-35B-A3B-uncensored-heretic-mmproj-BF16.gguf"
+        MmprojInclude = "*heretic-mmproj-BF16*"
+        IsMoe         = $true
+        Label         = "Qwen3.6-35B-A3B Heretic Cerebellum 14GB (vision, MoE)"
     }
     "qwen35-9b" = @{
         Repo          = "unsloth/Qwen3.5-9B-GGUF"
@@ -305,15 +317,48 @@ function Wait-LlmHealthy {
     }
 }
 
+function Get-ProcessStartTimeUtc {
+    param([int]$ProcessId)
+    try {
+        return (Get-Process -Id $ProcessId -ErrorAction Stop).StartTime.ToUniversalTime()
+    } catch {
+        return $null
+    }
+}
+
+function Stop-HostControllerProcesses {
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*host_controller.py*" } |
+        ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+}
+
 function Ensure-HostController {
     $port = 8900
-    try {
-        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -UseBasicParsing -TimeoutSec 2
-        if ($resp.StatusCode -eq 200) { return }
-    } catch { }
-
     $controller = Join-Path $ScriptDir "host_controller.py"
     if (-not (Test-Path $controller)) { return }
+
+    $scriptMtime = (Get-Item $controller).LastWriteTimeUtc
+    $running = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*host_controller.py*" })
+
+    $stale = $false
+    foreach ($proc in $running) {
+        $startUtc = Get-ProcessStartTimeUtc -ProcessId $proc.ProcessId
+        if ($startUtc -and $startUtc -lt $scriptMtime) { $stale = $true; break }
+    }
+
+    if ($stale -or $running.Count -gt 1) {
+        Write-Info "Restarting host controller (code updated or duplicate processes)..."
+        Stop-HostControllerProcesses
+        Start-Sleep -Seconds 1
+    } elseif ($running.Count -eq 1) {
+        try {
+            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -UseBasicParsing -TimeoutSec 2
+            if ($resp.StatusCode -eq 200) { return }
+        } catch { }
+    }
 
     Write-Info "Starting host controller on http://127.0.0.1:$port ..."
     Start-Process -FilePath "python" -ArgumentList @($controller) -WorkingDirectory $ScriptDir -WindowStyle Hidden

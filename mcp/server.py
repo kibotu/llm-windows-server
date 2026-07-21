@@ -85,7 +85,7 @@ def switch_model(
     wait: bool = True,
     cancel: bool = True,
 ) -> str:
-    """Switch the loaded GGUF model on the Windows host (qwen36 or qwen35-9b).
+    """Switch the loaded GGUF model on the Windows host (qwen36, heretic, or qwen35-9b).
 
     Cancels any in-flight reconcile by default, then re-runs run.ps1 with the
     requested model. Set wait=false to return immediately after the job is accepted.

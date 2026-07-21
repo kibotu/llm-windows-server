@@ -71,7 +71,7 @@ Cursor, etc.) uses the admin API on the same `:8899` port:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/admin/status` | GET | Current model, llama health, reconcile job |
-| `/admin/models` | GET | Available aliases (`qwen36`, `qwen35-9b`) |
+| `/admin/models` | GET | Available aliases (`qwen36`, `heretic`, `qwen35-9b`) |
 | `/admin/reconcile` | POST | Switch model (re-runs `run.ps1` on the host) |
 
 Auth: `Authorization: Bearer <LLAMA_ADMIN_KEY>` (defaults to `LLAMA_API_KEY`).
@@ -135,10 +135,12 @@ Reads `LLAMA_API_KEY` / `LLAMA_ADMIN_KEY` from the repo `.env` automatically.
 .\scripts\llm-status.ps1          # current model
 .\scripts\switch-to-9b.ps1        # switch to Qwen3.5-9B (returns immediately)
 .\scripts\switch-to-35b.ps1       # switch to Qwen3.6-35B (returns immediately)
+.\scripts\switch-to-heretic.ps1   # switch to Heretic Cerebellum 14GB (returns immediately)
 .\scripts\llm-status.ps1 -Json    # raw admin/status JSON
 
 # Block until the reload finishes (can take several minutes):
 .\scripts\switch-to-9b.ps1 -Wait
+.\scripts\switch-to-heretic.ps1 -Wait
 ```
 
 These call the same `/admin/*` API as the MCP server (no MCP runtime needed).
@@ -149,11 +151,13 @@ The server must be running (`.\run.ps1`) so `host_controller.py` is available.
 | Alias | Model | Size | Vision | Notes |
 |-------|-------|------|--------|-------|
 | `qwen36` | Qwen3.6-35B-A3B IQ4_XS | ~17 GB | Yes | **Default.** MoE, experts offloaded to RAM. |
+| `heretic` | [Qwen3.6-35B-A3B Heretic Cerebellum 14GB](https://huggingface.co/deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF) | ~14.5 GB | Yes | MoE Cerebellum quant; uses its own mmproj. |
 | `qwen35-9b` | Qwen3.5-9B Q4_K_M | ~5 GB | Yes | Lighter, dense, faster. |
 
-Both download on demand into `.\models\` (gitignored). Switch with `-Model`:
+Models download on demand into `.\models\` (gitignored). Switch with `-Model`:
 
 ```powershell
+.\run.ps1 -Model heretic
 .\run.ps1 -Model qwen35-9b
 ```
 
@@ -169,7 +173,7 @@ The whole project is two PowerShell scripts plus the Compose stack — nothing e
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `-Model` | `qwen36` | `qwen36` or `qwen35-9b` |
+| `-Model` | `qwen36` | `qwen36`, `heretic`, or `qwen35-9b` |
 | `-Context` | `262144` | Total KV context tokens |
 | `-Parallel` | `1` | Concurrent request slots (context is split across them) |
 | `-Thinking` | `$true` | Extended reasoning / `<think>` blocks |
@@ -201,7 +205,7 @@ model (via the `hf` CLI reading `HF_TOKEN` from `.env`), opens the firewall, and
 prunes old Docker layers. Idempotent — re-run it to update.
 
 ```powershell
-.\setup.ps1 [-Model qwen36|qwen35-9b] [-SkipModel] [-Clean]
+.\setup.ps1 [-Model qwen36|heretic|qwen35-9b] [-SkipModel] [-Clean]
 ```
 
 | Parameter | Description |

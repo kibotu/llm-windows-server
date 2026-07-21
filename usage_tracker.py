@@ -433,7 +433,7 @@ def admin_status():
 @app.route("/admin/models", methods=["GET", "OPTIONS"])
 @app.route("/admin/models/", methods=["GET", "OPTIONS"])
 def admin_models():
-    """List switchable model aliases (qwen36, qwen35-9b)."""
+    """List switchable model aliases (qwen36, heretic, qwen35-9b)."""
     if request.method == "OPTIONS":
         return add_cors_headers(Response(""))
 

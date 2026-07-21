@@ -163,6 +163,55 @@ function Get-LocalRuntimeState {
     }
 }
 
+function Enrich-RuntimeState {
+    param($Runtime)
+
+    if (-not $Runtime -or -not $Runtime.model) { return $Runtime }
+
+    $needsEnrich = (-not $Runtime.label) -or (-not $Runtime.context) -or (-not $Runtime.model_file)
+    if (-not $needsEnrich) { return $Runtime }
+
+    try {
+        $models = Invoke-AdminGet -Path "/admin/models"
+        $match = $models.models | Where-Object { $_.id -eq $Runtime.model } | Select-Object -First 1
+        if (-not $match) { return $Runtime }
+
+        if (-not $Runtime.label) {
+            $Runtime | Add-Member -NotePropertyName label -NotePropertyValue $match.label -Force
+        }
+        if (-not $Runtime.context) {
+            $Runtime | Add-Member -NotePropertyName context -NotePropertyValue $match.default_context -Force
+        }
+        if (-not $Runtime.model_file) {
+            $Runtime | Add-Member -NotePropertyName model_file -NotePropertyValue $match.model_file -Force
+        }
+    } catch { }
+
+    return $Runtime
+}
+
+function Get-DisplayRuntimeStatus {
+    param(
+        $Runtime,
+        $Job,
+        [bool]$LlmHealthy
+    )
+
+    $runtimeStatus = if ($Runtime) { $Runtime.status } else { $null }
+    $jobStatus = if ($Job) { $Job.status } else { $null }
+
+    if ($runtimeStatus -eq "running" -or $jobStatus -eq "running") { return "running" }
+    if ($LlmHealthy) {
+        if ($jobStatus -eq "failed" -or $runtimeStatus -eq "failed") {
+            return "ready (last switch failed)"
+        }
+        if ($runtimeStatus) { return $runtimeStatus }
+        return "ready"
+    }
+    if ($runtimeStatus) { return $runtimeStatus }
+    return "unknown"
+}
+
 function Show-AdminStatus {
     param([switch]$Json)
 
@@ -172,22 +221,32 @@ function Show-AdminStatus {
         $local = Get-LocalRuntimeState
         if ($local) { $rt = $local }
     }
+    $rt = Enrich-RuntimeState -Runtime $rt
+    $llmHealthy = [bool]$status.llm.healthy
+    $displayStatus = Get-DisplayRuntimeStatus -Runtime $rt -Job $status.job -LlmHealthy $llmHealthy
 
     if ($Json) {
         if ($rt -and -not $status.runtime.model) {
             $status | Add-Member -NotePropertyName runtime -NotePropertyValue $rt -Force
         }
+        $status | Add-Member -NotePropertyName display_status -NotePropertyValue $displayStatus -Force
         $status | ConvertTo-Json -Depth 8
         return
     }
 
     Write-Host ("Server:     {0}" -f $(if ($rt.model) { $rt.model } else { "unknown" }))
     Write-Host ("Label:      {0}" -f $(if ($rt.label) { $rt.label } else { "n/a" }))
-    Write-Host ("Status:     {0}" -f $(if ($rt.status) { $rt.status } else { "unknown" }))
+    Write-Host ("Status:     {0}" -f $displayStatus)
     Write-Host ("Context:    {0}" -f $(if ($rt.context) { $rt.context } else { "n/a" }))
     Write-Host ("Thinking:   {0}" -f $(if ($null -ne $rt.thinking) { $rt.thinking } else { "n/a" }))
     Write-Host ("Vision:     {0}" -f $(if ($null -ne $rt.vision) { $rt.vision } else { "n/a" }))
     Write-Host ("Updated:    {0}" -f $(if ($rt.updated_at) { $rt.updated_at } else { "n/a" }))
     Write-Host ("LLM health: {0}" -f $status.llm.healthy)
     Write-Host ("Job:        {0}" -f $(if ($status.job.status) { $status.job.status } else { "n/a" }))
+    if ($status.job.error -and $status.job.status -eq "failed") {
+        $errLine = ($status.job.error -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
+        if ($errLine) {
+            Write-Host ("Job error:  {0}" -f $errLine.Trim()) -ForegroundColor Yellow
+        }
+    }
 }
