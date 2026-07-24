@@ -15,6 +15,11 @@
           "id": "/models/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
           "name": "Big — Qwen3.6-35B-A3B IQ4_XS (vision, MoE)",
           "reasoning": true,
+          "attachment": true,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
           "limit": {
             "context": 262144,
             "output": 8000
@@ -24,6 +29,11 @@
           "id": "/models/Qwen3.5-9B-Q4_K_M.gguf",
           "name": "Small — Qwen3.5-9B Q4_K_M (vision, dense)",
           "reasoning": true,
+          "attachment": true,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
           "limit": {
             "context": 128000,
             "output": 6000
@@ -33,6 +43,11 @@
           "id": "/models/Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf",
           "name": "Heretic — Qwen3.6-35B-A3B Cerebellum 14GB (vision, MoE)",
           "reasoning": true,
+          "attachment": true,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
           "limit": {
             "context": 262144,
             "output": 8000
