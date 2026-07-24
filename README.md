@@ -101,21 +101,33 @@ the llama container with the requested GGUF.
 
 ### MCP (Cursor / agents)
 
+The MCP server speaks **Streamable HTTP** (JSON-RPC over HTTP), not stdio. Clients
+connect with a **URL** — no repo clone, no local Python process. It runs on the
+Windows host (`127.0.0.1:8901`) and is reverse-proxied at `:8899/mcp`, so remote
+clients use the **same WAN port and bearer key** as inference and `/admin/*`:
+
+```
+client ──▶ usage-tracker :8899 /mcp ──▶ mcp/server.py :8901 (Windows host)
+                                               │
+                                               └── GET/POST /admin/* on :8899
+```
+
+`run.ps1` auto-starts `mcp/server.py` (alongside `host_controller.py`). One-time
+dependency install on the host:
+
 ```powershell
 pip install -r mcp/requirements.txt
 ```
 
-Add to Cursor MCP config (see `mcp/cursor-mcp.example.json`):
+Configure any client with a URL + bearer header (see `mcp/cursor-mcp.example.json`):
 
 ```json
 {
   "mcpServers": {
     "llm-server": {
-      "command": "python",
-      "args": ["D:/llm-server/mcp/server.py"],
-      "env": {
-        "LLM_SERVER_URL": "http://<host-ip>:8899",
-        "LLAMA_ADMIN_KEY": "sk-..."
+      "url": "http://<host-ip>:8899/mcp",
+      "headers": {
+        "Authorization": "Bearer <LLAMA_ADMIN_KEY>"
       }
     }
   }
@@ -124,8 +136,12 @@ Add to Cursor MCP config (see `mcp/cursor-mcp.example.json`):
 
 Tools: `list_models`, `get_server_status`, `switch_model`.
 
-On the Pi, point `LLM_SERVER_URL` at your Tailscale/LAN IP. After switching,
-tell Hermes `/model small` or `/model big` to match.
+`/mcp` is gated by the admin key (it can run `run.ps1`), so treat it like `/admin/*`.
+On a remote box (Pi, laptop), use the host's WAN/Tailscale/LAN IP. After a
+`switch_model`, tell Hermes `/sync` (or `/model big`/`/model small`) to match.
+
+> **Local-only stdio** is still available for a client on the same machine: set
+> `MCP_TRANSPORT=stdio` and launch `mcp/server.py` as a `command`/`args` server.
 
 ### Shell scripts (Windows)
 

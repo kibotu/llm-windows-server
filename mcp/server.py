@@ -1,21 +1,73 @@
 #!/usr/bin/env python3
-"""MCP server for remote llm-server model switching and status."""
+"""MCP server for remote llm-server model switching and status.
+
+Transport: Streamable HTTP (JSON-RPC over HTTP) mounted at /mcp. It listens on the
+Windows host (default 127.0.0.1:8901). Remote clients never talk to it directly -
+the usage-tracker proxy on :8899 reverse-proxies /mcp -> here (same pattern it uses
+for /admin/*), so one WAN port + one bearer key covers inference, admin, and MCP.
+
+    client ──▶ usage-tracker :8899 /mcp ──▶ mcp/server.py :8901 (Windows host)
+                                                    │
+                                                    └── GET/POST /admin/* on :8899
+
+run.ps1 auto-starts this alongside host_controller.py. Configure a remote client
+(Cursor, Hermes, ...) with a URL instead of a stdio command:
+
+    { "mcpServers": { "llm-server": {
+        "url": "http://<host-ip>:8899/mcp",
+        "headers": { "Authorization": "Bearer <LLAMA_ADMIN_KEY>" } } } }
+
+Set MCP_TRANSPORT=stdio to fall back to the classic stdio transport (local only).
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import re
+import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
-SERVER_URL = os.environ.get("LLM_SERVER_URL", "http://127.0.0.1:8899").rstrip("/")
-ADMIN_KEY = os.environ.get("LLAMA_ADMIN_KEY", "").strip() or os.environ.get("LLAMA_API_KEY", "").strip()
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+
+
+def _read_dotenv(key: str) -> str:
+    """Read a key from the repo .env (so the host process needs no exported env)."""
+    env_file = REPO_ROOT / ".env"
+    if not env_file.is_file():
+        return ""
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(.+?)\s*$")
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+# The MCP server calls the admin API through the proxy (:8899) so /admin/status
+# includes llama.cpp health, which _wait_for_ready needs.
+SERVER_URL = (os.environ.get("LLM_SERVER_URL") or "http://127.0.0.1:8899").rstrip("/")
+ADMIN_KEY = (
+    os.environ.get("LLAMA_ADMIN_KEY", "").strip()
+    or os.environ.get("LLAMA_API_KEY", "").strip()
+    or _read_dotenv("LLAMA_ADMIN_KEY")
+    or _read_dotenv("LLAMA_API_KEY")
+)
 POLL_INTERVAL = float(os.environ.get("LLM_SWITCH_POLL_INTERVAL", "5"))
 POLL_TIMEOUT = float(os.environ.get("LLM_SWITCH_POLL_TIMEOUT", "600"))
 
-mcp = FastMCP("llm-server")
+MCP_HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
+MCP_PORT = int(os.environ.get("MCP_BIND_PORT", "8901"))
+MCP_TRANSPORT = (os.environ.get("MCP_TRANSPORT") or "streamable-http").strip()
+
+mcp = FastMCP("llm-server", host=MCP_HOST, port=MCP_PORT)
 
 
 def _headers() -> dict[str, str]:
@@ -41,8 +93,6 @@ def _request(method: str, path: str, *, json_body: dict[str, Any] | None = None)
 
 
 def _wait_for_ready() -> dict[str, Any]:
-    import time
-
     deadline = time.time() + POLL_TIMEOUT
     last: dict[str, Any] = {}
     while time.time() < deadline:
@@ -104,5 +154,16 @@ def switch_model(
     return json.dumps({"accepted": accepted, "final": final}, indent=2)
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    """Liveness probe used by run.ps1 when auto-starting this server."""
+    return JSONResponse({"status": "ok"})
+
+
 if __name__ == "__main__":
-    mcp.run()
+    transport = "stdio" if MCP_TRANSPORT == "stdio" else "streamable-http"
+    if transport == "streamable-http":
+        print(f"llm-server MCP (streamable-http) on http://{MCP_HOST}:{MCP_PORT}/mcp")
+        print(f"Admin API target: {SERVER_URL}")
+        print(f"Admin auth: {'ENABLED' if ADMIN_KEY else 'disabled (open)'}")
+    mcp.run(transport=transport)

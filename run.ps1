@@ -376,6 +376,56 @@ function Ensure-HostController {
     Write-Warn "Host controller did not start; remote /admin/reconcile will be unavailable"
 }
 
+function Stop-McpServerProcesses {
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*mcp*server.py*" } |
+        ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+}
+
+function Ensure-McpServer {
+    $port = 8901
+    $server = Join-Path $ScriptDir "mcp\server.py"
+    if (-not (Test-Path $server)) { return }
+
+    $scriptMtime = (Get-Item $server).LastWriteTimeUtc
+    $running = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*mcp*server.py*" })
+
+    $stale = $false
+    foreach ($proc in $running) {
+        $startUtc = Get-ProcessStartTimeUtc -ProcessId $proc.ProcessId
+        if ($startUtc -and $startUtc -lt $scriptMtime) { $stale = $true; break }
+    }
+
+    if ($stale -or $running.Count -gt 1) {
+        Write-Info "Restarting MCP server (code updated or duplicate processes)..."
+        Stop-McpServerProcesses
+        Start-Sleep -Seconds 1
+    } elseif ($running.Count -eq 1) {
+        try {
+            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -UseBasicParsing -TimeoutSec 2
+            if ($resp.StatusCode -eq 200) { return }
+        } catch { }
+    }
+
+    Write-Info "Starting MCP server on http://127.0.0.1:$port/mcp ..."
+    Start-Process -FilePath "python" -ArgumentList @($server) -WorkingDirectory $ScriptDir -WindowStyle Hidden
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        try {
+            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -UseBasicParsing -TimeoutSec 2
+            if ($resp.StatusCode -eq 200) {
+                Write-Ok "MCP server ready (remote /mcp enabled)"
+                return
+            }
+        } catch { }
+    }
+    Write-Warn "MCP server did not start; remote /mcp will be unavailable. Install deps: pip install -r mcp/requirements.txt"
+}
+
 function Get-LocalIp {
     $adapters = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.IPAddress -notlike "169.254.*" -and $_.IPAddress -notlike "127.*" -and $_.PrefixOrigin -ne "WellKnown" })
@@ -522,6 +572,7 @@ Write-Ok "Environment set"
 Write-Step "Starting server"
 Ensure-UsageDataStorage
 Ensure-HostController
+Ensure-McpServer
 $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 try {
     $out = docker compose -f $ComposeFile up -d 2>&1
@@ -561,6 +612,7 @@ if ($apiKey) {
 Write-Host ""
 Write-Host "  .\run.ps1 -Stop   stop     |   docker compose logs -f   logs" -ForegroundColor DarkGray
 Write-Host "  POST /admin/reconcile on :8899  remote model switch (via host controller)" -ForegroundColor DarkGray
+Write-Host "  MCP endpoint      /mcp on :8899  agents (Cursor/Hermes) over HTTP" -ForegroundColor DarkGray
 
 if ($NoFollow) {
     exit 0

@@ -131,6 +131,8 @@ services:
       - LLAMA_ADMIN_KEY=${LLAMA_ADMIN_KEY:-}
       # Windows host controller (host_controller.py). Not exposed externally.
       - HOST_CONTROLLER_URL=${HOST_CONTROLLER_URL:-http://host.docker.internal:8900}
+      # Streamable-HTTP MCP server (mcp/server.py) on the host, reverse-proxied at /mcp.
+      - MCP_SERVER_URL=${MCP_SERVER_URL:-http://host.docker.internal:8901}
 
     restart: unless-stopped
 

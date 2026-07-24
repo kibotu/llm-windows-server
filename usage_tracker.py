@@ -23,6 +23,9 @@ API_KEY = os.environ.get("LLAMA_API_KEY", "").strip()
 # Admin key for /admin/* (model switching). Falls back to LLAMA_API_KEY.
 ADMIN_KEY = os.environ.get("LLAMA_ADMIN_KEY", "").strip() or API_KEY
 HOST_CONTROLLER_URL = os.environ.get("HOST_CONTROLLER_URL", "http://host.docker.internal:8900").rstrip("/")
+# Streamable-HTTP MCP server on the Windows host (mcp/server.py). Reverse-proxied
+# at /mcp so remote clients use one WAN port (:8899) + the admin key for everything.
+MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://host.docker.internal:8901").rstrip("/")
 TRACKING_DIR = "/data"
 REQUESTS_LOG = os.path.join(TRACKING_DIR, "requests.jsonl")
 SUMMARY_FILE = os.path.join(TRACKING_DIR, "daily_summary.json")
@@ -324,7 +327,10 @@ def add_cors_headers(response):
     """Add CORS headers to response."""
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Allow-Headers"] = (
+        "Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID"
+    )
+    response.headers["Access-Control-Expose-Headers"] = "Mcp-Session-Id"
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
@@ -556,6 +562,87 @@ def admin_reconcile():
     return _forward_admin("POST", "admin/reconcile", request)
 
 
+_MCP_METHODS = ["GET", "POST", "DELETE", "OPTIONS"]
+
+
+@app.route("/mcp", methods=_MCP_METHODS)
+@app.route("/mcp/", methods=_MCP_METHODS)
+@app.route("/mcp/<path:subpath>", methods=_MCP_METHODS)
+def mcp_proxy(subpath: str = ""):
+    """Reverse-proxy the Streamable-HTTP MCP server on the Windows host.
+
+    Gated by the admin key because MCP tools can switch models (run.ps1). SSE
+    responses are streamed; the read timeout is disabled so a long-running
+    switch_model tool call (waits for the model to load) is not cut off.
+    """
+    if request.method == "OPTIONS":
+        return add_cors_headers(Response(""))
+
+    if not is_admin_authorized(request):
+        body = json.dumps({"error": {
+            "message": "Invalid or missing admin API key",
+            "type": "invalid_request_error",
+            "code": "invalid_api_key",
+        }})
+        resp = Response(body, status=401, mimetype="application/json")
+        resp.headers["WWW-Authenticate"] = "Bearer"
+        return add_cors_headers(resp)
+
+    target = f"{MCP_SERVER_URL}/mcp"
+    if subpath:
+        target = f"{target}/{subpath}"
+
+    headers = {key: value for (key, value) in request.headers if key.lower() != "host"}
+    # MCP listens on 127.0.0.1; uvicorn rejects Host: host.docker.internal from Docker.
+    from urllib.parse import urlparse
+    parsed = urlparse(MCP_SERVER_URL)
+    port = parsed.port or 8901
+    headers["Host"] = f"127.0.0.1:{port}"
+
+    try:
+        upstream = requests.request(
+            request.method,
+            target,
+            headers=headers,
+            params=request.args,
+            data=request.get_data(),
+            stream=True,
+            timeout=(10, None),
+        )
+    except requests.exceptions.RequestException as exc:
+        body = json.dumps({
+            "error": {
+                "message": (
+                    f"MCP server unreachable at {MCP_SERVER_URL}. "
+                    "Start it on the Windows host: python mcp/server.py "
+                    "(run.ps1 auto-starts it)."
+                ),
+                "detail": str(exc),
+                "code": "mcp_server_unavailable",
+            }
+        })
+        resp = Response(body, status=503, mimetype="application/json")
+        return add_cors_headers(resp)
+
+    if upstream.headers.get("Content-Type", "").startswith("text/event-stream"):
+        def generate():
+            for chunk in upstream.iter_content(chunk_size=4096):
+                if chunk:
+                    yield chunk
+
+        response = Response(
+            generate(), status=upstream.status_code,
+            headers=filter_proxy_headers(upstream.headers),
+        )
+        return add_cors_headers(response)
+
+    response = Response(
+        upstream.content, status=upstream.status_code,
+        headers=filter_proxy_headers(upstream.headers),
+    )
+    return add_cors_headers(response)
+
+
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 def proxy(path):
@@ -782,6 +869,7 @@ if __name__ == "__main__":
     print(f"Session gap: {SESSION_GAP_MINUTES} minutes")
     print(f"API key auth: {'ENABLED' if API_KEY else 'disabled (open server)'}")
     print(f"Admin API: /admin/status /admin/models /admin/reconcile")
+    print(f"MCP endpoint: /mcp -> {MCP_SERVER_URL}")
     print(f"Host controller: {HOST_CONTROLLER_URL}")
     print(f"Admin auth: {'ENABLED' if ADMIN_KEY else 'disabled (open server)'}")
 
