@@ -57,11 +57,62 @@ exposes both models and points at the server through the proxy.
    }
    ```
 
-3. Start OpenCode — it defaults to `llama-at-home/qwen36-35b`. Switch models with the
-   picker or the `"model"` field.
+3. Start OpenCode — it defaults to `llama-at-home/big`. Pick any of the three models
+   in the selector (`big`, `small`, `heretic`) or set `"model"` to
+   `llama-at-home/<alias>`. Only one GGUF is loaded at a time on the server; use
+   the MCP `switch_model` tool (below) to reload before switching.
 
 The shipped config also sets sensible context limits, auto-compaction, and tool
 permissions; trim the `permission` / `mcp` blocks to taste — they're just a demo.
+
+| OpenCode alias | Server alias | GGUF |
+|----------------|--------------|------|
+| `big` | `qwen36` | `Qwen3.6-35B-A3B-UD-IQ4_XS.gguf` |
+| `small` | `qwen35-9b` | `Qwen3.5-9B-Q4_K_M.gguf` |
+| `heretic` | `heretic` | `Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf` |
+
+#### MCP (model switching)
+
+OpenCode can call the llm-server MCP tools over HTTP so the agent can list models,
+check status, and switch the loaded GGUF without leaving the chat. Add this to the
+`mcp` block in `~/.config/opencode/opencode.json` (or merge into
+[`opencode/opencode.json`](opencode/opencode.json) before copying):
+
+```jsonc
+"mcp": {
+  "llm-server": {
+    "type": "http",
+    "url": "http://<host-ip>:8899/mcp",
+    "enabled": true,
+    "headers": {
+      "Authorization": "Bearer <LLAMA_ADMIN_KEY>"
+    },
+    "timeout": 660000
+  }
+}
+```
+
+Use `type: "http"` for Streamable HTTP (what this server speaks). `type: "remote"`
+is the older SSE alias and will not work here. Set `timeout` high enough for
+`switch_model` (model reload can take several minutes).
+
+- **Same machine:** `http://127.0.0.1:8899/mcp`
+- **Remote client:** your LAN/Tailscale/WAN IP, same port as inference
+- **Auth:** `LLAMA_ADMIN_KEY` from `.env` (falls back to `LLAMA_API_KEY`)
+
+Tools exposed: `list_models`, `get_server_status`, `switch_model`. Ask the agent
+e.g. *"switch to the small model"* — it calls `switch_model("qwen35-9b")`, which
+reloads the container via `run.ps1` and waits until ready.
+
+The server must be running (`.\run.ps1`) so the usage-tracker proxy and host MCP
+server are up. Quick check from the client machine:
+
+```powershell
+.\scripts\test-mcp-list-models.ps1          # on the Windows host
+.\scripts\switch-mcp-to-small.ps1 -Wait   # switch via MCP (big/small/heretic)
+```
+
+Or from any machine with curl, see the MCP section below.
 
 ## Remote model switching (Hermes / MCP)
 
@@ -154,13 +205,21 @@ Reads `LLAMA_API_KEY` / `LLAMA_ADMIN_KEY` from the repo `.env` automatically.
 .\scripts\switch-to-heretic.ps1   # switch to Heretic Cerebellum 14GB (returns immediately)
 .\scripts\llm-status.ps1 -Json    # raw admin/status JSON
 
+# MCP (Streamable HTTP via :8899/mcp):
+.\scripts\test-mcp-list-models.ps1
+.\scripts\switch-mcp-to-big.ps1
+.\scripts\switch-mcp-to-small.ps1
+.\scripts\switch-mcp-to-heretic.ps1
+
 # Block until the reload finishes (can take several minutes):
 .\scripts\switch-to-9b.ps1 -Wait
 .\scripts\switch-to-heretic.ps1 -Wait
+.\scripts\switch-mcp-to-small.ps1 -Wait
 ```
 
-These call the same `/admin/*` API as the MCP server (no MCP runtime needed).
-The server must be running (`.\run.ps1`) so `host_controller.py` is available.
+These call the same `/admin/*` API as the MCP server (REST scripts) or the MCP
+`switch_model` tool directly (MCP scripts). The server must be running (`.\run.ps1`)
+so `host_controller.py` and `mcp/server.py` are available.
 
 ## Models
 

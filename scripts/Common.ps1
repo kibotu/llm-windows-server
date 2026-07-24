@@ -153,6 +153,193 @@ function Switch-AdminModel {
     return $final
 }
 
+function Get-McpUrl {
+    Initialize-AdminConfig
+    return "$($env:LLM_SERVER_URL)/mcp"
+}
+
+function Get-McpHeaders {
+    $headers = Get-AdminHeaders
+    $headers.Accept = "application/json, text/event-stream"
+    return $headers
+}
+
+function Get-McpSseMessages {
+    param([string]$Text)
+    $messages = @()
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line.StartsWith("data: ")) {
+            $messages += ($line.Substring(6) | ConvertFrom-Json)
+        }
+    }
+    return $messages
+}
+
+function Invoke-McpPost {
+    param(
+        [string]$Url,
+        [hashtable]$Headers,
+        [string]$Body,
+        [int]$TimeoutSec = 30
+    )
+    try {
+        return Invoke-WebRequest -Uri $Url -Method Post -Headers $Headers `
+            -Body $Body -ContentType "application/json" -TimeoutSec $TimeoutSec -UseBasicParsing
+    } catch {
+        $detail = $_.Exception.Message
+        if ($_.ErrorDetails.Message) { $detail = $_.ErrorDetails.Message }
+        throw "MCP POST $Url failed: $detail"
+    }
+}
+
+function New-McpSession {
+    param(
+        [string]$Url,
+        [hashtable]$BaseHeaders
+    )
+
+    $initBody = @{
+        jsonrpc = "2.0"
+        id      = 1
+        method  = "initialize"
+        params  = @{
+            protocolVersion = "2025-06-18"
+            capabilities    = @{}
+            clientInfo      = @{ name = "llm-server-scripts"; version = "1" }
+        }
+    } | ConvertTo-Json -Depth 6 -Compress
+
+    $resp = Invoke-McpPost -Url $Url -Headers $BaseHeaders -Body $initBody
+    $session = $resp.Headers["mcp-session-id"]
+    if (-not $session) {
+        throw "MCP initialize did not return mcp-session-id. Body: $($resp.Content)"
+    }
+
+    $initMsgs = Get-McpSseMessages -Text $resp.Content
+    $serverInfo = $null
+    if ($initMsgs.Count -gt 0 -and $initMsgs[0].result.serverInfo) {
+        $serverInfo = $initMsgs[0].result.serverInfo
+    }
+
+    $sessionHeaders = [ordered]@{
+        Accept                 = "application/json, text/event-stream"
+        "Content-Type"         = "application/json"
+        "mcp-session-id"       = $session
+        "MCP-Protocol-Version" = "2025-06-18"
+    }
+    foreach ($key in $BaseHeaders.Keys) {
+        if ($key -notin $sessionHeaders.Keys) {
+            $sessionHeaders[$key] = $BaseHeaders[$key]
+        }
+    }
+
+    $initializedBody = '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+    Invoke-McpPost -Url $Url -Headers $sessionHeaders -Body $initializedBody | Out-Null
+
+    return @{
+        SessionId  = $session
+        Headers    = $sessionHeaders
+        ServerInfo = $serverInfo
+    }
+}
+
+function Invoke-McpTool {
+    param(
+        [string]$Url,
+        [hashtable]$SessionHeaders,
+        [string]$ToolName,
+        [hashtable]$Arguments = @{},
+        [int]$TimeoutSec = 30
+    )
+
+    $body = @{
+        jsonrpc = "2.0"
+        id      = 2
+        method  = "tools/call"
+        params  = @{
+            name      = $ToolName
+            arguments = $Arguments
+        }
+    } | ConvertTo-Json -Depth 6 -Compress
+
+    $resp = Invoke-McpPost -Url $Url -Headers $SessionHeaders -Body $body -TimeoutSec $TimeoutSec
+    $messages = Get-McpSseMessages -Text $resp.Content
+    if ($messages.Count -eq 0) {
+        throw "MCP tools/call returned no SSE data: $($resp.Content)"
+    }
+
+    $result = $messages[0].result
+    if ($messages[0].error) {
+        throw "MCP tools/call error: $($messages[0].error | ConvertTo-Json -Compress)"
+    }
+    if ($result.isError) {
+        throw "MCP tool '$ToolName' failed: $($result | ConvertTo-Json -Depth 6 -Compress)"
+    }
+
+    $text = $result.content | Where-Object { $_.type -eq "text" } | Select-Object -First 1 -ExpandProperty text
+    if (-not $text) {
+        return $result
+    }
+    try {
+        return $text | ConvertFrom-Json
+    } catch {
+        return $text
+    }
+}
+
+function Switch-McpModel {
+    param(
+        [Parameter(Mandatory = $true)][string]$Model,
+        [int]$Context = 0,
+        [switch]$Wait,
+        [switch]$Json
+    )
+
+    Initialize-AdminConfig
+    $mcpUrl = Get-McpUrl
+    $session = New-McpSession -Url $mcpUrl -BaseHeaders (Get-McpHeaders)
+
+    $args = @{
+        model  = $Model
+        cancel = $true
+        wait   = [bool]$Wait
+    }
+    if ($Context -gt 0) {
+        $args.context = $Context
+    }
+
+    $timeout = if ($Wait) { [int]$env:LLM_SWITCH_POLL_TIMEOUT + 60 } else { 30 }
+
+    Write-Host "Switching to $Model via $mcpUrl (MCP switch_model, wait=$($Wait.IsPresent)) ..." -ForegroundColor Cyan
+    $result = Invoke-McpTool -Url $mcpUrl -SessionHeaders $session.Headers `
+        -ToolName "switch_model" -Arguments $args -TimeoutSec $timeout
+
+    if ($Json) {
+        @{
+            mcp_url     = $mcpUrl
+            server_info = $session.ServerInfo
+            switch      = $result
+        } | ConvertTo-Json -Depth 8
+        return $result
+    }
+
+    $result | ConvertTo-Json -Depth 6 | Write-Host
+
+    if (-not $Wait) {
+        Write-Host "Switch started. Run .\scripts\llm-status.ps1 to check progress." -ForegroundColor Gray
+        return $result
+    }
+
+    $final = $result.final
+    if ($final) {
+        $rt = $final.runtime
+        $label = if ($rt.label) { $rt.label } else { $rt.model }
+        $ctx = if ($rt.context) { $rt.context } else { "n/a" }
+        Write-Host "Ready: $label (context $ctx)" -ForegroundColor Green
+    }
+    return $result
+}
+
 function Get-LocalRuntimeState {
     $path = Join-Path (Get-AdminRepoRoot) "usage_data\runtime_state.json"
     if (-not (Test-Path $path)) { return $null }

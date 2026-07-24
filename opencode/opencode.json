@@ -11,25 +11,38 @@
         "chunkTimeout": 120000
       },
       "models": {
-        "qwen36-35b": {
-          "name": "Qwen3.6-35B-A3B (IQ4_XS)",
+        "big": {
+          "id": "/models/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
+          "name": "Big — Qwen3.6-35B-A3B IQ4_XS (vision, MoE)",
+          "reasoning": true,
           "limit": {
             "context": 262144,
             "output": 8000
           }
         },
-        "Qwen3.5-9B": {
-          "name": "Qwen3.5-9B",
+        "small": {
+          "id": "/models/Qwen3.5-9B-Q4_K_M.gguf",
+          "name": "Small — Qwen3.5-9B Q4_K_M (vision, dense)",
+          "reasoning": true,
           "limit": {
             "context": 128000,
             "output": 6000
+          }
+        },
+        "heretic": {
+          "id": "/models/Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf",
+          "name": "Heretic — Qwen3.6-35B-A3B Cerebellum 14GB (vision, MoE)",
+          "reasoning": true,
+          "limit": {
+            "context": 262144,
+            "output": 8000
           }
         }
       }
     }
   },
-  "model": "llama-at-home/qwen36-35b",
-  "small_model": "llama-at-home/qwen36-35b",
+  "model": "llama-at-home/big",
+  "small_model": "llama-at-home/small",
   "snapshot": false,
   "compaction": {
     "auto": true,
@@ -175,6 +188,15 @@
     "write": "allow"
   },
   "mcp": {
+    "llm-server": {
+      "type": "http",
+      "url": "http://127.0.0.1:8899/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer sk-REPLACE-WITH-LLAMA_API_KEY-FROM-DOTENV"
+      },
+      "timeout": 660000
+    },
     "chrome-devtools": {
       "type": "local",
       "command": [
