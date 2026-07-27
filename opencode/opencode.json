@@ -208,9 +208,20 @@
       "url": "http://127.0.0.1:8899/mcp",
       "enabled": true,
       "headers": {
-        "Authorization": "Bearer sk-REPLACE-WITH-LLAMA_API_KEY-FROM-DOTENV"
+        "Authorization": "Bearer sk-REPLACE-WITH-LLAMA_API_KEY-FROM-DOTENV",
+        "Accept": "application/json, text/event-stream"
       },
-      "timeout": 660000
+      "timeout": 660000,
+      "tools": {
+        "include": [
+          "list_tools",
+          "list_models",
+          "get_server_status",
+          "switch_model",
+          "start_server",
+          "stop_server"
+        ]
+      }
     },
     "chrome-devtools": {
       "type": "local",

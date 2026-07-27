@@ -11,7 +11,7 @@
       3. Hugging Face CLI      install/upgrade latest 'hf' + login from .env
       4. Server API key        generate a random key into .env (if missing)
       5. llama.cpp image       pull the latest image tag from docker-compose.yml
-      6. usage-tracker proxy   (re)build from this repo's Dockerfile
+      6. gateway proxy        (re)build from this repo's Dockerfile
       7. Model                 download GGUF + vision projector into .\models\
       8. Firewall              open the server port for LAN access
       9. Cleanup               prune dangling Docker layers (models untouched)
@@ -345,11 +345,11 @@ Write-Step "llama.cpp server image"
 Invoke-Compose @("pull", "llm")
 Write-Ok "Image up to date (tag from docker-compose.yml)"
 
-# --- 6. usage-tracker proxy --------------------------------------------------
-Write-Step "usage-tracker proxy"
+# --- 6. gateway proxy ---------------------------------------------------------
+Write-Step "gateway proxy"
 Ensure-UsageDataStorage
-Invoke-Compose @("build", "--pull", "usage-tracker")
-Write-Ok "Proxy image built"
+Invoke-Compose @("build", "--pull", "gateway")
+Write-Ok "Gateway image built"
 
 # --- 7. Model ----------------------------------------------------------------
 Write-Step "Model download"

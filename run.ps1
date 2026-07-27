@@ -185,7 +185,7 @@ function Ensure-UsageDataStorage {
     }
 
     New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
-    # Legacy single-file store is migrated by usage_tracker on startup.
+    # Legacy single-file store is migrated by gateway on startup.
     if (-not (Test-Path $dataFile) -and -not (Test-Path (Join-Path $dataDir "requests.jsonl"))) {
         if (Test-Path $legacyPath -PathType Leaf) {
             Move-Item -Force $legacyPath $dataFile
@@ -611,8 +611,7 @@ if ($apiKey) {
 }
 Write-Host ""
 Write-Host "  .\run.ps1 -Stop   stop     |   docker compose logs -f   logs" -ForegroundColor DarkGray
-Write-Host "  POST /admin/reconcile on :8899  remote model switch (via host controller)" -ForegroundColor DarkGray
-Write-Host "  MCP endpoint      /mcp on :8899  agents (Cursor/Hermes) over HTTP" -ForegroundColor DarkGray
+Write-Host "  MCP endpoint      /mcp on :8899  all admin ops (list/switch/start/stop)" -ForegroundColor DarkGray
 
 if ($NoFollow) {
     exit 0

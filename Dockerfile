@@ -1,4 +1,4 @@
-# usage-tracker proxy image only. The LLM itself runs from the llama.cpp image
+# Gateway image only. The LLM itself runs from the llama.cpp image
 # defined in docker-compose.yml (llm service); flags/env are documented there.
 FROM python:3.11-slim
 
@@ -8,8 +8,8 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir flask requests
 
-COPY usage_tracker.py .
+COPY gateway.py .
 
 EXPOSE 8899
 
-CMD ["python", "usage_tracker.py"]
+CMD ["python", "gateway.py"]

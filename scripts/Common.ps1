@@ -34,6 +34,11 @@ function Initialize-AdminConfig {
     }
     $env:LLM_SERVER_URL = $env:LLM_SERVER_URL.TrimEnd("/")
 
+    if (-not $env:HOST_CONTROLLER_URL) {
+        $env:HOST_CONTROLLER_URL = "http://127.0.0.1:8900"
+    }
+    $env:HOST_CONTROLLER_URL = $env:HOST_CONTROLLER_URL.TrimEnd("/")
+
     if (-not $env:LLAMA_ADMIN_KEY) {
         $env:LLAMA_ADMIN_KEY = Get-DotEnvValue -Key "LLAMA_ADMIN_KEY" -EnvFile $envFile
     }
@@ -63,7 +68,7 @@ function Invoke-AdminGet {
     param([string]$Path)
 
     Initialize-AdminConfig
-    $uri = "$($env:LLM_SERVER_URL)$Path"
+    $uri = "$($env:HOST_CONTROLLER_URL)$Path"
     try {
         return Invoke-RestMethod -Uri $uri -Method Get -Headers (Get-AdminHeaders) -TimeoutSec 30
     } catch {
@@ -80,7 +85,7 @@ function Invoke-AdminPost {
     )
 
     Initialize-AdminConfig
-    $uri = "$($env:LLM_SERVER_URL)$Path"
+    $uri = "$($env:HOST_CONTROLLER_URL)$Path"
     $json = $Body | ConvertTo-Json -Compress
     try {
         return Invoke-RestMethod -Uri $uri -Method Post -Headers (Get-AdminHeaders) `
@@ -136,7 +141,7 @@ function Switch-AdminModel {
         $body.context = $Context
     }
 
-    Write-Host "Switching to $Model via $($env:LLM_SERVER_URL)/admin/reconcile ..." -ForegroundColor Cyan
+    Write-Host "Switching to $Model via $($env:HOST_CONTROLLER_URL)/admin/reconcile ..." -ForegroundColor Cyan
     $accepted = Invoke-AdminPost -Path "/admin/reconcile" -Body $body
     $accepted | ConvertTo-Json -Depth 6 | Write-Host
 
@@ -409,13 +414,21 @@ function Show-AdminStatus {
         if ($local) { $rt = $local }
     }
     $rt = Enrich-RuntimeState -Runtime $rt
-    $llmHealthy = [bool]$status.llm.healthy
+
+    # LLM health via gateway /health (llama.cpp is not exposed on host)
+    $llmHealthy = $false
+    try {
+        $healthResp = Invoke-RestMethod -Uri "$($env:LLM_SERVER_URL)/health" -Method Get -TimeoutSec 5 -ErrorAction SilentlyContinue
+        $llmHealthy = ($null -ne $healthResp)
+    } catch { }
+
     $displayStatus = Get-DisplayRuntimeStatus -Runtime $rt -Job $status.job -LlmHealthy $llmHealthy
 
     if ($Json) {
         if ($rt -and -not $status.runtime.model) {
             $status | Add-Member -NotePropertyName runtime -NotePropertyValue $rt -Force
         }
+        $status | Add-Member -NotePropertyName llm -NotePropertyValue @{ healthy = $llmHealthy } -Force
         $status | Add-Member -NotePropertyName display_status -NotePropertyValue $displayStatus -Force
         $status | ConvertTo-Json -Depth 8
         return
@@ -428,7 +441,7 @@ function Show-AdminStatus {
     Write-Host ("Thinking:   {0}" -f $(if ($null -ne $rt.thinking) { $rt.thinking } else { "n/a" }))
     Write-Host ("Vision:     {0}" -f $(if ($null -ne $rt.vision) { $rt.vision } else { "n/a" }))
     Write-Host ("Updated:    {0}" -f $(if ($rt.updated_at) { $rt.updated_at } else { "n/a" }))
-    Write-Host ("LLM health: {0}" -f $status.llm.healthy)
+    Write-Host ("LLM health: {0}" -f $llmHealthy)
     Write-Host ("Job:        {0}" -f $(if ($status.job.status) { $status.job.status } else { "n/a" }))
     if ($status.job.error -and $status.job.status -eq "failed") {
         $errLine = ($status.job.error -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)

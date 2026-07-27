@@ -2,9 +2,8 @@
 """
 Host-side controller for the llm-server stack.
 
-Runs on the Windows host (not inside Docker). The usage-tracker proxy forwards
-/admin/* requests here via host.docker.internal. This process invokes run.ps1
-to reconcile the llama.cpp container with new parameters.
+Runs on the Windows host (not inside Docker). The gateway proxy forwards
+/mcp requests to mcp/server.py, which calls this controller for admin operations.
 
 Start once and leave running:
     python host_controller.py
@@ -363,7 +362,8 @@ class ControllerHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/") or "/"
-        if path != "/admin/reconcile":
+
+        if path not in ("/admin/reconcile", "/admin/start", "/admin/stop"):
             return _json_response(self, 404, {"error": {"message": "Not found"}})
 
         if not _authorized(self._headers_dict()):
@@ -373,10 +373,69 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 {"error": {"message": "Invalid or missing admin API key", "code": "invalid_api_key"}},
             )
 
+        if path == "/admin/stop":
+            return self._handle_stop()
+
+        if path == "/admin/start":
+            return self._handle_start()
+
+        # /admin/reconcile
         try:
             body = self._read_json_body()
         except json.JSONDecodeError:
             return _json_response(self, 400, {"error": {"message": "Invalid JSON body"}})
+
+        params = {k: v for k, v in body.items() if k != "cancel"}
+        cancel = body.get("cancel", True)
+        result = reconcile_manager.start(params, cancel=cancel)
+        status = 202 if result.get("status") == "accepted" else 409 if result.get("status") == "busy" else 400
+        return _json_response(self, status, result)
+
+    def _handle_stop(self) -> None:
+        """Stop the llm-server stack (docker compose down)."""
+        cmd = [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(RUN_PS1), "-Stop",
+        ]
+        try:
+            result = subprocess.run(
+                cmd, cwd=str(SCRIPT_DIR), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=60,
+            )
+            if result.returncode == 0:
+                _write_runtime_state({"status": "stopped", "stopped_at": _utc_now()})
+                return _json_response(self, 200, {
+                    "status": "stopped",
+                    "message": "Server stopped successfully",
+                })
+            else:
+                tail = "\n".join(result.stdout.splitlines()[-20:])
+                return _json_response(self, 500, {
+                    "status": "error",
+                    "message": f"Stop failed (exit {result.returncode})",
+                    "output": tail,
+                })
+        except subprocess.TimeoutExpired:
+            return _json_response(self, 504, {
+                "status": "error",
+                "message": "Stop command timed out after 60s",
+            })
+        except Exception as exc:
+            return _json_response(self, 500, {
+                "status": "error",
+                "message": f"Failed to run stop command: {exc}",
+            })
+
+    def _handle_start(self) -> None:
+        """Start the llm-server stack via reconcile (docker compose up)."""
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            body = {}
+
+        if not body.get("model"):
+            runtime = _read_runtime_state()
+            body.setdefault("model", runtime.get("model") or "qwen36")
 
         params = {k: v for k, v in body.items() if k != "cancel"}
         cancel = body.get("cancel", True)

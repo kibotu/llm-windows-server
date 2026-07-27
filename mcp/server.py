@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""MCP server for remote llm-server model switching and status.
+"""MCP server for remote llm-server model switching, status, and lifecycle.
 
 Transport: Streamable HTTP (JSON-RPC over HTTP) mounted at /mcp. It listens on the
 Windows host (default 127.0.0.1:8901). Remote clients never talk to it directly -
-the usage-tracker proxy on :8899 reverse-proxies /mcp -> here (same pattern it uses
-for /admin/*), so one WAN port + one bearer key covers inference, admin, and MCP.
+the gateway proxy on :8899 reverse-proxies /mcp -> here, so one WAN port + one
+bearer key covers inference and MCP.
 
-    client ──▶ usage-tracker :8899 /mcp ──▶ mcp/server.py :8901 (Windows host)
+    client ──▶ gateway :8899 /mcp ──▶ mcp/server.py :8901 (Windows host)
                                                     │
-                                                    └── GET/POST /admin/* on :8899
+                                                    └── host_controller :8900 /admin/*
 
 run.ps1 auto-starts this alongside host_controller.py. Configure a remote client
 (Cursor, Hermes, ...) with a URL instead of a stdio command:
@@ -51,9 +51,16 @@ def _read_dotenv(key: str) -> str:
     return ""
 
 
-# The MCP server calls the admin API through the proxy (:8899) so /admin/status
-# includes llama.cpp health, which _wait_for_ready needs.
-SERVER_URL = (os.environ.get("LLM_SERVER_URL") or "http://127.0.0.1:8899").rstrip("/")
+# The MCP server calls the host controller directly on :8900.
+HOST_CONTROLLER_URL = (
+    os.environ.get("HOST_CONTROLLER_URL") or "http://127.0.0.1:8900"
+).rstrip("/")
+
+# Gateway proxy for LLM health checks (llama.cpp is not exposed on host).
+GATEWAY_URL = (
+    os.environ.get("LLM_SERVER_URL") or "http://127.0.0.1:8899"
+).rstrip("/")
+
 ADMIN_KEY = (
     os.environ.get("LLAMA_ADMIN_KEY", "").strip()
     or os.environ.get("LLAMA_API_KEY", "").strip()
@@ -76,9 +83,11 @@ def _headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {ADMIN_KEY}"}
 
 
-def _request(method: str, path: str, *, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
-    url = f"{SERVER_URL}{path}"
-    with httpx.Client(timeout=30.0) as client:
+def _request(
+    method: str, path: str, *, json_body: dict[str, Any] | None = None, timeout: float = 30.0
+) -> dict[str, Any]:
+    url = f"{HOST_CONTROLLER_URL}{path}"
+    with httpx.Client(timeout=timeout) as client:
         if method == "GET":
             resp = client.get(url, headers=_headers())
         else:
@@ -92,6 +101,16 @@ def _request(method: str, path: str, *, json_body: dict[str, Any] | None = None)
     return payload
 
 
+def _llm_health() -> dict[str, Any]:
+    """Check llama.cpp health through the gateway proxy."""
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(f"{GATEWAY_URL}/health", headers=_headers())
+        return {"healthy": resp.status_code == 200, "status_code": resp.status_code}
+    except Exception as exc:
+        return {"healthy": False, "error": str(exc)}
+
+
 def _wait_for_ready() -> dict[str, Any]:
     deadline = time.time() + POLL_TIMEOUT
     last: dict[str, Any] = {}
@@ -99,10 +118,12 @@ def _wait_for_ready() -> dict[str, Any]:
         last = _request("GET", "/admin/status")
         runtime = last.get("runtime") or {}
         job = last.get("job") or {}
-        llm = last.get("llm") or {}
 
-        if runtime.get("status") == "ready" and llm.get("healthy"):
-            return last
+        if runtime.get("status") == "ready":
+            llm = _llm_health()
+            if llm.get("healthy"):
+                last["llm"] = llm
+                return last
         if job.get("status") == "failed":
             raise RuntimeError(f"Model switch failed: {job.get('error') or job}")
         if runtime.get("status") == "failed":
@@ -124,6 +145,7 @@ def list_models() -> str:
 def get_server_status() -> str:
     """Get current model runtime state, reconcile job status, and llama.cpp health."""
     data = _request("GET", "/admin/status")
+    data["llm"] = _llm_health()
     return json.dumps(data, indent=2)
 
 
@@ -154,6 +176,47 @@ def switch_model(
     return json.dumps({"accepted": accepted, "final": final}, indent=2)
 
 
+@mcp.tool()
+def start_server(model: str | None = None, context: int | None = None) -> str:
+    """Start the llm-server stack (docker compose up with the specified model).
+
+    If no model is given, uses the last active model or defaults to qwen36.
+    Returns immediately after the job is accepted; use get_server_status to poll.
+    """
+    body: dict[str, Any] = {"cancel": True}
+    if model:
+        body["model"] = model
+    if context is not None:
+        body["context"] = context
+
+    result = _request("POST", "/admin/start", json_body=body)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def stop_server() -> str:
+    """Stop the llm-server stack (docker compose down).
+
+    Shuts down the llama.cpp and gateway containers.
+    """
+    result = _request("POST", "/admin/stop", timeout=90.0)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def list_tools() -> str:
+    """List all available MCP tools on this server with their descriptions."""
+    tools = [
+        {"name": "list_tools", "description": "List all available MCP tools on this server with their descriptions."},
+        {"name": "list_models", "description": "List switchable model aliases (qwen36, heretic, qwen35-9b)."},
+        {"name": "get_server_status", "description": "Get current model, runtime state, job status, and llama.cpp health."},
+        {"name": "switch_model", "description": "Switch the loaded GGUF model. Params: model (required), context, thinking, wait, cancel."},
+        {"name": "start_server", "description": "Start the llm-server stack (docker compose up). Params: model (optional), context."},
+        {"name": "stop_server", "description": "Stop the llm-server stack (docker compose down)."},
+    ]
+    return json.dumps({"tools": tools, "count": len(tools)}, indent=2)
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_request: Request) -> JSONResponse:
     """Liveness probe used by run.ps1 when auto-starting this server."""
@@ -164,6 +227,7 @@ if __name__ == "__main__":
     transport = "stdio" if MCP_TRANSPORT == "stdio" else "streamable-http"
     if transport == "streamable-http":
         print(f"llm-server MCP (streamable-http) on http://{MCP_HOST}:{MCP_PORT}/mcp")
-        print(f"Admin API target: {SERVER_URL}")
+        print(f"Host controller: {HOST_CONTROLLER_URL}")
+        print(f"Gateway: {GATEWAY_URL}")
         print(f"Admin auth: {'ENABLED' if ADMIN_KEY else 'disabled (open)'}")
     mcp.run(transport=transport)

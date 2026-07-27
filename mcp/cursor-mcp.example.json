@@ -3,8 +3,10 @@
     "llm-server": {
       "url": "http://127.0.0.1:8899/mcp",
       "headers": {
-        "Authorization": "Bearer sk-your-admin-or-inference-key"
-      }
+        "Authorization": "Bearer sk-your-admin-or-inference-key",
+        "Accept": "application/json, text/event-stream"
+      },
+      "timeout": 660000
     }
   }
 }

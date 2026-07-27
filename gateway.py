@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Usage tracking proxy for llama.cpp server.
-Tracks token usage per request with per-day, per-session, and per-client aggregation.
+Inference gateway for llama.cpp server.
+Auth, token metering, model-list enrichment, and MCP reverse-proxy in one edge layer.
 """
 
 import hmac
@@ -20,9 +20,8 @@ app = Flask(__name__)
 LLAMA_SERVER_URL = os.environ.get("LLAMA_SERVER_URL", "http://llm:8888")
 # Bearer key clients must present. Empty string disables auth (open server).
 API_KEY = os.environ.get("LLAMA_API_KEY", "").strip()
-# Admin key for /admin/* (model switching). Falls back to LLAMA_API_KEY.
+# Admin key for MCP proxy gate. Falls back to LLAMA_API_KEY.
 ADMIN_KEY = os.environ.get("LLAMA_ADMIN_KEY", "").strip() or API_KEY
-HOST_CONTROLLER_URL = os.environ.get("HOST_CONTROLLER_URL", "http://host.docker.internal:8900").rstrip("/")
 # Streamable-HTTP MCP server on the Windows host (mcp/server.py). Reverse-proxied
 # at /mcp so remote clients use one WAN port (:8899) + the admin key for everything.
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://host.docker.internal:8901").rstrip("/")
@@ -30,10 +29,9 @@ TRACKING_DIR = "/data"
 REQUESTS_LOG = os.path.join(TRACKING_DIR, "requests.jsonl")
 SUMMARY_FILE = os.path.join(TRACKING_DIR, "daily_summary.json")
 LEGACY_FILE = os.path.join(TRACKING_DIR, "usage_data.json")
-RUNTIME_STATE_FILE = os.path.join(TRACKING_DIR, "runtime_state.json")
 SESSION_GAP_MINUTES = 30
 
-# Must match host_controller.py MODEL_CATALOG (used when admin API is unreachable).
+# Used to enrich /v1/models so clients can validate model names before a reload.
 SWITCHABLE_MODELS: Dict[str, Dict[str, Any]] = {
     "qwen36": {
         "model_file": "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
@@ -355,24 +353,6 @@ def filter_proxy_headers(upstream_headers) -> Dict[str, str]:
     }
 
 
-def _read_runtime_state() -> Dict[str, Any]:
-    if not os.path.exists(RUNTIME_STATE_FILE):
-        return {"status": "unknown"}
-    try:
-        with open(RUNTIME_STATE_FILE, "r", encoding="utf-8-sig") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {"status": "unknown"}
-    except Exception:
-        return {"status": "unknown"}
-
-
-def _llm_health() -> Dict[str, Any]:
-    try:
-        resp = requests.get(f"{LLAMA_SERVER_URL}/health", timeout=5)
-        return {"healthy": resp.status_code == 200, "status_code": resp.status_code}
-    except requests.exceptions.RequestException as exc:
-        return {"healthy": False, "error": str(exc)}
-
 
 def _model_path(model_file: str) -> str:
     if model_file.startswith("/models/"):
@@ -381,17 +361,6 @@ def _model_path(model_file: str) -> str:
 
 
 def _fetch_switchable_models() -> List[Dict[str, Any]]:
-    try:
-        headers: Dict[str, str] = {}
-        if ADMIN_KEY:
-            headers["Authorization"] = f"Bearer {ADMIN_KEY}"
-        resp = requests.get(f"{HOST_CONTROLLER_URL}/admin/models", headers=headers, timeout=5)
-        if resp.ok:
-            models = resp.json().get("models", [])
-            if isinstance(models, list) and models:
-                return models
-    except Exception as exc:
-        print(f"[MODELS] admin/models unavailable: {exc}")
     return [{"id": model_id, **meta} for model_id, meta in SWITCHABLE_MODELS.items()]
 
 
@@ -443,124 +412,7 @@ def _enrich_v1_models(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _admin_auth_headers(req) -> Dict[str, str]:
-    headers = {}
-    auth = req.headers.get("Authorization")
-    if auth:
-        headers["Authorization"] = auth
-    for key in ("X-Api-Key", "Api-Key"):
-        value = req.headers.get(key)
-        if value:
-            headers[key] = value
-    return headers
-
-
-def _forward_admin(method: str, path: str, req) -> Response:
-    url = f"{HOST_CONTROLLER_URL}/{path.lstrip('/')}"
-    headers = _admin_auth_headers(req)
-    try:
-        if method == "GET":
-            upstream = requests.get(url, headers=headers, params=request.args, timeout=30)
-        else:
-            upstream = requests.post(
-                url,
-                headers={**headers, "Content-Type": "application/json"},
-                data=request.get_data(),
-                timeout=30,
-            )
-    except requests.exceptions.RequestException as exc:
-        body = json.dumps({
-            "error": {
-                "message": (
-                    f"Host controller unreachable at {HOST_CONTROLLER_URL}. "
-                    "Start it on the Windows host: python host_controller.py"
-                ),
-                "detail": str(exc),
-                "code": "host_controller_unavailable",
-            }
-        })
-        resp = Response(body, status=503, mimetype="application/json")
-        return add_cors_headers(resp)
-
-    resp = Response(upstream.content, status=upstream.status_code, mimetype="application/json")
-    return add_cors_headers(resp)
-
-
-@app.route("/admin/status", methods=["GET", "OPTIONS"])
-@app.route("/admin/status/", methods=["GET", "OPTIONS"])
-def admin_status():
-    """Current runtime model state + llama.cpp health + host-controller job status."""
-    if request.method == "OPTIONS":
-        return add_cors_headers(Response(""))
-
-    if not is_admin_authorized(request):
-        body = json.dumps({"error": {
-            "message": "Invalid or missing admin API key",
-            "type": "invalid_request_error",
-            "code": "invalid_api_key",
-        }})
-        resp = Response(body, status=401, mimetype="application/json")
-        resp.headers["WWW-Authenticate"] = "Bearer"
-        return add_cors_headers(resp)
-
-    payload = {
-        "runtime": _read_runtime_state(),
-        "llm": _llm_health(),
-    }
-
-    try:
-        upstream = requests.get(
-            f"{HOST_CONTROLLER_URL}/admin/status",
-            headers=_admin_auth_headers(request),
-            timeout=10,
-        )
-        if upstream.ok:
-            payload["job"] = upstream.json().get("job")
-    except requests.exceptions.RequestException:
-        payload["job"] = {"status": "host_controller_unavailable"}
-
-    return add_cors_headers(jsonify(payload))
-
-
-@app.route("/admin/models", methods=["GET", "OPTIONS"])
-@app.route("/admin/models/", methods=["GET", "OPTIONS"])
-def admin_models():
-    """List switchable model aliases (qwen36, heretic, qwen35-9b)."""
-    if request.method == "OPTIONS":
-        return add_cors_headers(Response(""))
-
-    if not is_admin_authorized(request):
-        body = json.dumps({"error": {
-            "message": "Invalid or missing admin API key",
-            "type": "invalid_request_error",
-            "code": "invalid_api_key",
-        }})
-        resp = Response(body, status=401, mimetype="application/json")
-        resp.headers["WWW-Authenticate"] = "Bearer"
-        return add_cors_headers(resp)
-
-    return _forward_admin("GET", "admin/models", request)
-
-
-@app.route("/admin/reconcile", methods=["POST", "OPTIONS"])
-@app.route("/admin/reconcile/", methods=["POST", "OPTIONS"])
-def admin_reconcile():
-    """Switch the loaded model by re-running run.ps1 on the Windows host."""
-    if request.method == "OPTIONS":
-        return add_cors_headers(Response(""))
-
-    if not is_admin_authorized(request):
-        body = json.dumps({"error": {
-            "message": "Invalid or missing admin API key",
-            "type": "invalid_request_error",
-            "code": "invalid_api_key",
-        }})
-        resp = Response(body, status=401, mimetype="application/json")
-        resp.headers["WWW-Authenticate"] = "Bearer"
-        return add_cors_headers(resp)
-
-    return _forward_admin("POST", "admin/reconcile", request)
-
+_MCP_METHODS = ["GET", "POST", "DELETE", "OPTIONS"]
 
 _MCP_METHODS = ["GET", "POST", "DELETE", "OPTIONS"]
 
@@ -662,9 +514,6 @@ def proxy(path):
         return add_cors_headers(resp)
 
     if path.startswith("usage"):
-        return Response("Not Found", status=404)
-
-    if path.startswith("admin"):
         return Response("Not Found", status=404)
 
     print(f"[PROXY] {request.method} /{path} from {request.remote_addr}")
@@ -868,9 +717,7 @@ if __name__ == "__main__":
     print(f"Forwarding to llama.cpp server at {LLAMA_SERVER_URL}")
     print(f"Session gap: {SESSION_GAP_MINUTES} minutes")
     print(f"API key auth: {'ENABLED' if API_KEY else 'disabled (open server)'}")
-    print(f"Admin API: /admin/status /admin/models /admin/reconcile")
     print(f"MCP endpoint: /mcp -> {MCP_SERVER_URL}")
-    print(f"Host controller: {HOST_CONTROLLER_URL}")
-    print(f"Admin auth: {'ENABLED' if ADMIN_KEY else 'disabled (open server)'}")
+    print(f"Admin auth (MCP): {'ENABLED' if ADMIN_KEY else 'disabled (open server)'}")
 
     app.run(host="0.0.0.0", port=8899, debug=False, threaded=True)

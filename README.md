@@ -23,7 +23,7 @@ That's it — the server is now serving an OpenAI-compatible API at `http://loca
 - **Base URL:** `http://<host-ip>:8899/v1`
 - **API key:** the `LLAMA_API_KEY` from `.env`, sent as `Authorization: Bearer <key>`
 
-Every request is validated against `LLAMA_API_KEY` by the usage-tracker proxy; a
+Every request is validated against `LLAMA_API_KEY` by the gateway proxy; a
 missing or wrong key gets a `401` (only `/health` stays open). Leaving the key blank
 disables auth entirely. Quick check:
 
@@ -100,11 +100,12 @@ is the older SSE alias and will not work here. Set `timeout` high enough for
 - **Remote client:** your LAN/Tailscale/WAN IP, same port as inference
 - **Auth:** `LLAMA_ADMIN_KEY` from `.env` (falls back to `LLAMA_API_KEY`)
 
-Tools exposed: `list_models`, `get_server_status`, `switch_model`. Ask the agent
-e.g. *"switch to the small model"* — it calls `switch_model("qwen35-9b")`, which
-reloads the container via `run.ps1` and waits until ready.
+Tools exposed: `list_tools`, `list_models`, `get_server_status`, `switch_model`,
+`start_server`, `stop_server`. Ask the agent e.g. *"switch to the small model"* —
+it calls `switch_model("qwen35-9b")`, which reloads the container via `run.ps1`
+and waits until ready.
 
-The server must be running (`.\run.ps1`) so the usage-tracker proxy and host MCP
+The server must be running (`.\run.ps1`) so the gateway proxy and host MCP
 server are up. Quick check from the client machine:
 
 ```powershell
@@ -114,36 +115,22 @@ server are up. Quick check from the client machine:
 
 Or from any machine with curl, see the MCP section below.
 
-## Remote model switching (Hermes / MCP)
+## Remote model switching (MCP-only)
 
-The server loads **one model at a time**. Switching from a remote client (Pi,
-Cursor, etc.) uses the admin API on the same `:8899` port:
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/admin/status` | GET | Current model, llama health, reconcile job |
-| `/admin/models` | GET | Available aliases (`qwen36`, `heretic`, `qwen35-9b`) |
-| `/admin/reconcile` | POST | Switch model (re-runs `run.ps1` on the host) |
-
-Auth: `Authorization: Bearer <LLAMA_ADMIN_KEY>` (defaults to `LLAMA_API_KEY`).
+The server loads **one model at a time**. All admin operations (status, models,
+switch, start, stop) are exposed exclusively via MCP tools on `:8899/mcp`:
 
 ```bash
-# Switch to the lighter 9B model from your Pi
-curl -X POST http://<host-ip>:8899/admin/reconcile \
-  -H "Authorization: Bearer <key>" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen35-9b","cancel":true}'
-
-# Poll until ready
-curl http://<host-ip>:8899/admin/status -H "Authorization: Bearer <key>"
+# Quick health check from any machine with curl
+curl http://<host-ip>:8899/health
 ```
 
 Architecture:
 
 ```
-client ──▶ usage-tracker :8899 /admin/* ──▶ host_controller.py :8900 (Windows host)
-                                                    │
-                                                    └── run.ps1 -NoFollow -Model …
+client ──▶ gateway :8899 /mcp ──▶ mcp/server.py :8901 ──▶ host_controller.py :8900
+                                                                    │
+                                                                    └── run.ps1 -NoFollow -Model …
 ```
 
 `host_controller.py` runs on the Windows host (auto-started by `run.ps1`). It
@@ -155,12 +142,12 @@ the llama container with the requested GGUF.
 The MCP server speaks **Streamable HTTP** (JSON-RPC over HTTP), not stdio. Clients
 connect with a **URL** — no repo clone, no local Python process. It runs on the
 Windows host (`127.0.0.1:8901`) and is reverse-proxied at `:8899/mcp`, so remote
-clients use the **same WAN port and bearer key** as inference and `/admin/*`:
+clients use the **same WAN port and bearer key** as inference:
 
 ```
-client ──▶ usage-tracker :8899 /mcp ──▶ mcp/server.py :8901 (Windows host)
+client ──▶ gateway :8899 /mcp ──▶ mcp/server.py :8901 (Windows host)
                                                │
-                                               └── GET/POST /admin/* on :8899
+                                               └── host_controller.py :8900 /admin/*
 ```
 
 `run.ps1` auto-starts `mcp/server.py` (alongside `host_controller.py`). One-time
@@ -171,6 +158,8 @@ pip install -r mcp/requirements.txt
 ```
 
 Configure any client with a URL + bearer header (see `mcp/cursor-mcp.example.json`):
+
+**Cursor** (`mcp/cursor-mcp.example.json`):
 
 ```json
 {
@@ -185,7 +174,38 @@ Configure any client with a URL + bearer header (see `mcp/cursor-mcp.example.jso
 }
 ```
 
-Tools: `list_models`, `get_server_status`, `switch_model`.
+**Hermes** (`~/.hermes/config.yaml`):
+
+```yaml
+mcp_servers:
+  kira:
+    url: http://<host-ip>:8899/mcp
+    headers:
+      Authorization: Bearer <LLAMA_ADMIN_KEY>
+      Accept: application/json, text/event-stream
+    timeout: 660
+    tools:
+      include:
+        - list_tools
+        - list_models
+        - get_server_status
+        - switch_model
+        - start_server
+        - stop_server
+      prompts: false
+      resources: false
+```
+
+#### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `list_tools` | List all available MCP tools with descriptions |
+| `list_models` | List switchable model aliases (qwen36, heretic, qwen35-9b) |
+| `get_server_status` | Current model, runtime state, job status, llama.cpp health |
+| `switch_model` | Switch the loaded GGUF model (params: `model`, `context`, `thinking`, `wait`, `cancel`) |
+| `start_server` | Start the stack — docker compose up (params: `model`, `context`) |
+| `stop_server` | Stop the stack — docker compose down |
 
 `/mcp` is gated by the admin key (it can run `run.ps1`), so treat it like `/admin/*`.
 On a remote box (Pi, laptop), use the host's WAN/Tailscale/LAN IP. After a
@@ -275,7 +295,7 @@ actually changes. Ctrl+C stops log streaming; the server keeps running.
 ### `setup.ps1` — setup + update in one
 
 Installs Docker Desktop, verifies GPU access, installs the latest Hugging Face CLI,
-pulls the latest llama.cpp image, rebuilds the usage-tracker proxy, downloads the
+pulls the latest llama.cpp image, rebuilds the gateway proxy, downloads the
 model (via the `hf` CLI reading `HF_TOKEN` from `.env`), opens the firewall, and
 prunes old Docker layers. Idempotent — re-run it to update.
 
@@ -298,7 +318,7 @@ prunes old Docker layers. Idempotent — re-run it to update.
 ## How it works
 
 ```
-client ──▶ usage-tracker (:8899) ──▶ llama.cpp server (:8888, GPU)
+client ──▶ gateway (:8899) ──▶ llama.cpp server (:8888, GPU)
                  │
                  ├─ requests.jsonl      append-only request log (survives restarts)
                  └─ daily_summary.json  per-day + per-client aggregates
