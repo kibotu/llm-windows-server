@@ -17,7 +17,7 @@
     "qwen35-9b" (lighter dense + vision), or "qwen35-4b" (tiny dense + vision).
 
 .PARAMETER Context
-    Total KV context tokens (default: 262144).
+    Total KV context tokens. Defaults to the model's default (262144 for 35B, 128000 for 9B, 96000 for 4B).
 
 .PARAMETER Parallel
     Concurrent request slots (default: 1). Context is split across slots.
@@ -72,7 +72,7 @@ param(
     [ValidateSet("qwen36", "heretic", "qwen35-9b", "qwen35-4b")]
     [string]$Model = "qwen36",
 
-    [int]$Context = 262144,
+    [int]$Context = 0,
 
     [int]$Parallel = 1,
 
@@ -117,44 +117,48 @@ $env:PYTHONUTF8 = "1"
 # =============================================================================
 $Models = @{
     "qwen36" = @{
-        Repo          = "unsloth/Qwen3.6-35B-A3B-GGUF"
-        File          = "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"
-        Include       = "*UD-IQ4_XS*"
-        MmprojRepo    = "unsloth/Qwen3.6-35B-A3B-GGUF"
-        MmprojFile    = "Qwen3.6-35B-A3B-mmproj-BF16.gguf"
-        MmprojInclude = "*mmproj-BF16*"
-        IsMoe         = $true
-        Label         = "Qwen3.6-35B-A3B IQ4_XS (vision, MoE)"
+        Repo           = "unsloth/Qwen3.6-35B-A3B-GGUF"
+        File           = "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"
+        Include        = "*UD-IQ4_XS*"
+        MmprojRepo     = "unsloth/Qwen3.6-35B-A3B-GGUF"
+        MmprojFile     = "Qwen3.6-35B-A3B-mmproj-BF16.gguf"
+        MmprojInclude  = "*mmproj-BF16*"
+        IsMoe          = $true
+        DefaultContext = 262144
+        Label          = "Qwen3.6-35B-A3B IQ4_XS (vision, MoE)"
     }
     "heretic" = @{
-        Repo          = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
-        File          = "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf"
-        Include       = "*Heretic-Cerebellum-14GB*"
-        MmprojRepo    = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
-        MmprojFile    = "Qwen3.6-35B-A3B-uncensored-heretic-mmproj-BF16.gguf"
-        MmprojInclude = "*heretic-mmproj-BF16*"
-        IsMoe         = $true
-        Label         = "Qwen3.6-35B-A3B Heretic Cerebellum 14GB (vision, MoE)"
+        Repo           = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
+        File           = "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf"
+        Include        = "*Heretic-Cerebellum-14GB*"
+        MmprojRepo     = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
+        MmprojFile     = "Qwen3.6-35B-A3B-uncensored-heretic-mmproj-BF16.gguf"
+        MmprojInclude  = "*heretic-mmproj-BF16*"
+        IsMoe          = $true
+        DefaultContext = 262144
+        Label          = "Qwen3.6-35B-A3B Heretic Cerebellum 14GB (vision, MoE)"
     }
     "qwen35-9b" = @{
-        Repo          = "unsloth/Qwen3.5-9B-GGUF"
-        File          = "Qwen3.5-9B-Q4_K_M.gguf"
-        Include       = "*Q4_K_M*"
-        MmprojRepo    = "unsloth/Qwen3.5-9B-GGUF"
-        MmprojFile    = "Qwen3.5-9B-mmproj-BF16.gguf"
-        MmprojInclude = "*mmproj-BF16*"
-        IsMoe         = $false
-        Label         = "Qwen3.5-9B Q4_K_M (vision, dense)"
+        Repo           = "unsloth/Qwen3.5-9B-GGUF"
+        File           = "Qwen3.5-9B-Q4_K_M.gguf"
+        Include        = "*Q4_K_M*"
+        MmprojRepo     = "unsloth/Qwen3.5-9B-GGUF"
+        MmprojFile     = "Qwen3.5-9B-mmproj-BF16.gguf"
+        MmprojInclude  = "*mmproj-BF16*"
+        IsMoe          = $false
+        DefaultContext = 128000
+        Label          = "Qwen3.5-9B Q4_K_M (vision, dense)"
     }
     "qwen35-4b" = @{
-        Repo          = "bartowski/Qwen_Qwen3.5-4B-GGUF"
-        File          = "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
-        Include       = "*Q4_K_M*"
-        MmprojRepo    = "unsloth/Qwen3.5-4B-GGUF"
-        MmprojFile    = "Qwen3.5-4B-mmproj-BF16.gguf"
-        MmprojInclude = "*mmproj-BF16*"
-        IsMoe         = $false
-        Label         = "Qwen3.5-4B Q4_K_M (vision, dense)"
+        Repo           = "bartowski/Qwen_Qwen3.5-4B-GGUF"
+        File           = "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+        Include        = "*Q4_K_M*"
+        MmprojRepo     = "unsloth/Qwen3.5-4B-GGUF"
+        MmprojFile     = "Qwen3.5-4B-mmproj-BF16.gguf"
+        MmprojInclude  = "*mmproj-BF16*"
+        IsMoe          = $false
+        DefaultContext = 96000
+        Label          = "Qwen3.5-4B Q4_K_M (vision, dense)"
     }
 }
 
@@ -512,6 +516,7 @@ Write-Ok "Docker is running"
 # --- 2. Model ----------------------------------------------------------------
 Write-Step "Model"
 $reg = $Models[$Model]
+if ($Context -le 0) { $Context = $reg.DefaultContext }
 $modelsDir = Join-Path $ScriptDir "models"
 if (-not (Test-Path $modelsDir)) { New-Item -ItemType Directory -Path $modelsDir | Out-Null }
 

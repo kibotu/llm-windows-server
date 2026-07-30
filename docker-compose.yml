@@ -18,7 +18,7 @@
 #   THREADS         CPU threads for experts/sampling (default: 10)
 #   BATCH_SIZE      Physical batch -b                (default: 2048)
 #   UBATCH_SIZE     Micro-batch -ub (== -b for MoE)  (default: 2048)
-#   MOE_FLAGS       Expert offload strategy          (default: --cpu-moe)
+#   MOE_FLAGS       Expert offload strategy          (set by run.ps1; empty for dense)
 #   REASONING       on | off - Qwen3 thinking mode   (default: on)
 #                   (--reasoning-preserve is always set so reasoning stays in the
 #                    prompt across turns - keeps the KV cache valid for agents)
@@ -95,7 +95,7 @@ services:
       --reasoning-preserve
       --jinja
       --metrics
-      ${MOE_FLAGS:---cpu-moe}
+      ${MOE_FLAGS:-}
       --no-mmap
       --mlock
       --numa distribute

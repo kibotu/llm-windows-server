@@ -47,7 +47,7 @@ SWITCHABLE_MODELS: Dict[str, Dict[str, Any]] = {
     },
     "qwen35-4b": {
         "model_file": "Qwen_Qwen3.5-4B-Q4_K_M.gguf",
-        "default_context": 128000,
+        "default_context": 96000,
     },
 }
 

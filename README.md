@@ -276,7 +276,7 @@ The whole project is two PowerShell scripts plus the Compose stack — nothing e
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `-Model` | `qwen36` | `qwen36`, `heretic`, `qwen35-9b`, or `qwen35-4b` |
-| `-Context` | `262144` | Total KV context tokens |
+| `-Context` | per-model | Total KV context tokens (262144 for 35B, 128000 for 9B, 96000 for 4B) |
 | `-Parallel` | `1` | Concurrent request slots (context is split across them) |
 | `-Thinking` | `$true` | Extended reasoning / `<think>` blocks |
 | `-Vision` | auto | Enable the vision projector (on when the mmproj file exists) |
@@ -298,6 +298,15 @@ The whole project is two PowerShell scripts plus the Compose stack — nothing e
 
 Re-running is safe: Docker Compose recreates the container only when the config
 actually changes. Ctrl+C stops log streaming; the server keeps running.
+
+For unattended operation, use the watchdog wrapper — it restarts `run.ps1` on
+crash, health failure, or container exit:
+
+```powershell
+.\run-watchdog.ps1                          # default model, unlimited retries
+.\run-watchdog.ps1 -Model qwen35-4b         # tiny model with auto-restart
+.\run-watchdog.ps1 -Delay 30 -MaxRetries 5  # give up after 5 consecutive failures
+```
 
 ### `setup.ps1` — setup + update in one
 

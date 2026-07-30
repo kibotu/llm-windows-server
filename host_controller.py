@@ -77,7 +77,7 @@ MODEL_CATALOG: dict[str, dict[str, Any]] = {
     "qwen35-4b": {
         "label": "Qwen3.5-4B Q4_K_M (vision, dense)",
         "model_file": "Qwen_Qwen3.5-4B-Q4_K_M.gguf",
-        "default_context": 128000,
+        "default_context": 96000,
     },
 }
 
