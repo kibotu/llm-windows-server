@@ -17,7 +17,7 @@
       9. Cleanup               prune dangling Docker layers (models untouched)
 
 .PARAMETER Model
-    Which model to ensure is downloaded: "qwen36" (default), "heretic", or "qwen35-9b".
+    Which model to ensure is downloaded: "qwen36" (default), "heretic", "qwen35-9b", or "qwen35-4b".
 
 .PARAMETER SkipModel
     Skip the model download step (just refresh Docker + tooling).
@@ -29,13 +29,14 @@
     .\setup.ps1                     # full setup / update with the default model
     .\setup.ps1 -Model heretic      # also fetch the Heretic Cerebellum 14GB model
     .\setup.ps1 -Model qwen35-9b    # also fetch the lighter 9B model
+    .\setup.ps1 -Model qwen35-4b    # also fetch the tiny 4B model
     .\setup.ps1 -SkipModel          # update Docker + tooling only
     .\setup.ps1 -Clean              # update and reclaim disk aggressively
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet("qwen36", "heretic", "qwen35-9b")]
+    [ValidateSet("qwen36", "heretic", "qwen35-9b", "qwen35-4b")]
     [string]$Model = "qwen36",
 
     [switch]$SkipModel,
@@ -80,6 +81,15 @@ $Models = @{
         MmprojFile    = "Qwen3.5-9B-mmproj-BF16.gguf"
         MmprojInclude = "*mmproj-BF16*"
         Label         = "Qwen3.5-9B Q4_K_M (vision, dense, ~5 GB)"
+    }
+    "qwen35-4b" = @{
+        Repo          = "bartowski/Qwen_Qwen3.5-4B-GGUF"
+        File          = "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+        Include       = "*Q4_K_M*"
+        MmprojRepo    = "unsloth/Qwen3.5-4B-GGUF"
+        MmprojFile    = "Qwen3.5-4B-mmproj-BF16.gguf"
+        MmprojInclude = "*mmproj-BF16*"
+        Label         = "Qwen3.5-4B Q4_K_M (vision, dense, ~3 GB)"
     }
 }
 
@@ -404,6 +414,7 @@ Write-Host ""
 Write-Host "  .\run.ps1                     # start default ($($Models[$Model].Label))" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model heretic      # Heretic Cerebellum 14GB" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Model qwen35-9b    # lighter model" -ForegroundColor Gray
+Write-Host "  .\run.ps1 -Model qwen35-4b    # tiny model" -ForegroundColor Gray
 Write-Host "  .\run.ps1 -Stop               # stop the server" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  API:      http://localhost:$ServerPort/v1" -ForegroundColor White

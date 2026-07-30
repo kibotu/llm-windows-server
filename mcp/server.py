@@ -157,7 +157,7 @@ def switch_model(
     wait: bool = True,
     cancel: bool = True,
 ) -> str:
-    """Switch the loaded GGUF model on the Windows host (qwen36, heretic, or qwen35-9b).
+    """Switch the loaded GGUF model on the Windows host (qwen36, heretic, qwen35-9b, or qwen35-4b).
 
     Cancels any in-flight reconcile by default, then re-runs run.ps1 with the
     requested model. Set wait=false to return immediately after the job is accepted.
@@ -208,7 +208,7 @@ def list_tools() -> str:
     """List all available MCP tools on this server with their descriptions."""
     tools = [
         {"name": "list_tools", "description": "List all available MCP tools on this server with their descriptions."},
-        {"name": "list_models", "description": "List switchable model aliases (qwen36, heretic, qwen35-9b)."},
+        {"name": "list_models", "description": "List switchable model aliases (qwen36, heretic, qwen35-9b, qwen35-4b)."},
         {"name": "get_server_status", "description": "Get current model, runtime state, job status, and llama.cpp health."},
         {"name": "switch_model", "description": "Switch the loaded GGUF model. Params: model (required), context, thinking, wait, cancel."},
         {"name": "start_server", "description": "Start the llm-server stack (docker compose up). Params: model (optional), context."},

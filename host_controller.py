@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUN_PS1 = SCRIPT_DIR / "run.ps1"
 RUNTIME_STATE_FILE = SCRIPT_DIR / "usage_data" / "runtime_state.json"
-VALID_MODELS = frozenset({"qwen36", "heretic", "qwen35-9b"})
+VALID_MODELS = frozenset({"qwen36", "heretic", "qwen35-9b", "qwen35-4b"})
 BIND_HOST = os.environ.get("HOST_CONTROLLER_BIND", "127.0.0.1")
 BIND_PORT = int(os.environ.get("HOST_CONTROLLER_PORT", "8900"))
 
@@ -72,6 +72,11 @@ MODEL_CATALOG: dict[str, dict[str, Any]] = {
     "qwen35-9b": {
         "label": "Qwen3.5-9B Q4_K_M (vision, dense)",
         "model_file": "Qwen3.5-9B-Q4_K_M.gguf",
+        "default_context": 128000,
+    },
+    "qwen35-4b": {
+        "label": "Qwen3.5-4B Q4_K_M (vision, dense)",
+        "model_file": "Qwen_Qwen3.5-4B-Q4_K_M.gguf",
         "default_context": 128000,
     },
 }

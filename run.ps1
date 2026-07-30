@@ -14,7 +14,7 @@
 
 .PARAMETER Model
     "qwen36" (default, 35B MoE + vision), "heretic" (35B Heretic Cerebellum 14GB MoE + vision),
-    or "qwen35-9b" (lighter dense + vision).
+    "qwen35-9b" (lighter dense + vision), or "qwen35-4b" (tiny dense + vision).
 
 .PARAMETER Context
     Total KV context tokens (default: 262144).
@@ -60,6 +60,7 @@
     .\run.ps1                            # Qwen3.6 35B, vision + reasoning, 262k ctx
     .\run.ps1 -Model heretic             # Heretic Cerebellum 14GB MoE + vision
     .\run.ps1 -Model qwen35-9b           # lighter 9B model
+    .\run.ps1 -Model qwen35-4b           # tiny 4B model
     .\run.ps1 -Context 65536 -Parallel 4 # 4 slots, shorter context (reconciles live)
     .\run.ps1 -KvCache q4_0              # save VRAM
     .\run.ps1 -Stop                      # stop the server
@@ -68,7 +69,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("qwen36", "heretic", "qwen35-9b")]
+    [ValidateSet("qwen36", "heretic", "qwen35-9b", "qwen35-4b")]
     [string]$Model = "qwen36",
 
     [int]$Context = 262144,
@@ -144,6 +145,16 @@ $Models = @{
         MmprojInclude = "*mmproj-BF16*"
         IsMoe         = $false
         Label         = "Qwen3.5-9B Q4_K_M (vision, dense)"
+    }
+    "qwen35-4b" = @{
+        Repo          = "bartowski/Qwen_Qwen3.5-4B-GGUF"
+        File          = "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+        Include       = "*Q4_K_M*"
+        MmprojRepo    = "unsloth/Qwen3.5-4B-GGUF"
+        MmprojFile    = "Qwen3.5-4B-mmproj-BF16.gguf"
+        MmprojInclude = "*mmproj-BF16*"
+        IsMoe         = $false
+        Label         = "Qwen3.5-4B Q4_K_M (vision, dense)"
     }
 }
 

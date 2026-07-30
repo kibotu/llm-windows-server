@@ -52,6 +52,20 @@
             "context": 262144,
             "output": 8000
           }
+        },
+        "tiny": {
+          "id": "/models/Qwen_Qwen3.5-4B-Q4_K_M.gguf",
+          "name": "Tiny — Qwen3.5-4B Q4_K_M (vision, dense)",
+          "reasoning": true,
+          "attachment": true,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 128000,
+            "output": 4000
+          }
         }
       }
     }
@@ -180,8 +194,6 @@
       "git remote*": "allow",
       "git fetch*": "allow",
       "git stash*": "allow",
-      "git add *": "allow",
-      "git restore *": "allow",
 
       "git commit*": "ask",
       "git push*": "ask",
@@ -192,6 +204,8 @@
       "git rebase*": "ask",
       "git clean*": "ask",
       "git rm *": "ask",
+      "git add *": "ask",
+      "git restore *": "ask",
 
       "rm *": "ask",
       "chmod *": "ask",

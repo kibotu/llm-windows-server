@@ -57,8 +57,8 @@ exposes both models and points at the server through the proxy.
    }
    ```
 
-3. Start OpenCode — it defaults to `llama-at-home/big`. Pick any of the three models
-   in the selector (`big`, `small`, `heretic`) or set `"model"` to
+3. Start OpenCode — it defaults to `llama-at-home/big`. Pick any of the four models
+   in the selector (`big`, `small`, `heretic`, `tiny`) or set `"model"` to
    `llama-at-home/<alias>`. Only one GGUF is loaded at a time on the server; use
    the MCP `switch_model` tool (below) to reload before switching.
 
@@ -70,6 +70,7 @@ permissions; trim the `permission` / `mcp` blocks to taste — they're just a de
 | `big` | `qwen36` | `Qwen3.6-35B-A3B-UD-IQ4_XS.gguf` |
 | `small` | `qwen35-9b` | `Qwen3.5-9B-Q4_K_M.gguf` |
 | `heretic` | `heretic` | `Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf` |
+| `tiny` | `qwen35-4b` | `Qwen_Qwen3.5-4B-Q4_K_M.gguf` |
 
 #### MCP (model switching)
 
@@ -101,8 +102,8 @@ is the older SSE alias and will not work here. Set `timeout` high enough for
 - **Auth:** `LLAMA_ADMIN_KEY` from `.env` (falls back to `LLAMA_API_KEY`)
 
 Tools exposed: `list_tools`, `list_models`, `get_server_status`, `switch_model`,
-`start_server`, `stop_server`. Ask the agent e.g. *"switch to the small model"* —
-it calls `switch_model("qwen35-9b")`, which reloads the container via `run.ps1`
+`start_server`, `stop_server`. Ask the agent e.g. *"switch to the tiny model"* —
+it calls `switch_model("qwen35-4b")`, which reloads the container via `run.ps1`
 and waits until ready.
 
 The server must be running (`.\run.ps1`) so the gateway proxy and host MCP
@@ -201,7 +202,7 @@ mcp_servers:
 | Tool | Description |
 |------|-------------|
 | `list_tools` | List all available MCP tools with descriptions |
-| `list_models` | List switchable model aliases (qwen36, heretic, qwen35-9b) |
+| `list_models` | List switchable model aliases (qwen36, heretic, qwen35-9b, qwen35-4b) |
 | `get_server_status` | Current model, runtime state, job status, llama.cpp health |
 | `switch_model` | Switch the loaded GGUF model (params: `model`, `context`, `thinking`, `wait`, `cancel`) |
 | `start_server` | Start the stack — docker compose up (params: `model`, `context`) |
@@ -223,6 +224,7 @@ Reads `LLAMA_API_KEY` / `LLAMA_ADMIN_KEY` from the repo `.env` automatically.
 .\scripts\switch-to-9b.ps1        # switch to Qwen3.5-9B (returns immediately)
 .\scripts\switch-to-35b.ps1       # switch to Qwen3.6-35B (returns immediately)
 .\scripts\switch-to-heretic.ps1   # switch to Heretic Cerebellum 14GB (returns immediately)
+.\scripts\switch-to-4b.ps1          # switch to Qwen3.5-4B (returns immediately)
 .\scripts\llm-status.ps1 -Json    # raw admin/status JSON
 
 # MCP (Streamable HTTP via :8899/mcp):
@@ -230,11 +232,14 @@ Reads `LLAMA_API_KEY` / `LLAMA_ADMIN_KEY` from the repo `.env` automatically.
 .\scripts\switch-mcp-to-big.ps1
 .\scripts\switch-mcp-to-small.ps1
 .\scripts\switch-mcp-to-heretic.ps1
+.\scripts\switch-mcp-to-tiny.ps1
 
 # Block until the reload finishes (can take several minutes):
 .\scripts\switch-to-9b.ps1 -Wait
 .\scripts\switch-to-heretic.ps1 -Wait
+.\scripts\switch-to-4b.ps1 -Wait
 .\scripts\switch-mcp-to-small.ps1 -Wait
+.\scripts\switch-mcp-to-tiny.ps1 -Wait
 ```
 
 These call the same `/admin/*` API as the MCP server (REST scripts) or the MCP
@@ -248,12 +253,14 @@ so `host_controller.py` and `mcp/server.py` are available.
 | `qwen36` | Qwen3.6-35B-A3B IQ4_XS | ~17 GB | Yes | **Default.** MoE, experts offloaded to RAM. |
 | `heretic` | [Qwen3.6-35B-A3B Heretic Cerebellum 14GB](https://huggingface.co/deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF) | ~14.5 GB | Yes | MoE Cerebellum quant; uses its own mmproj. |
 | `qwen35-9b` | Qwen3.5-9B Q4_K_M | ~5 GB | Yes | Lighter, dense, faster. |
+| `qwen35-4b` | [Qwen3.5-4B Q4_K_M](https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF) | ~3 GB | Yes | Tiny, dense, fastest. |
 
 Models download on demand into `.\models\` (gitignored). Switch with `-Model`:
 
 ```powershell
 .\run.ps1 -Model heretic
 .\run.ps1 -Model qwen35-9b
+.\run.ps1 -Model qwen35-4b
 ```
 
 ## The two scripts
@@ -268,7 +275,7 @@ The whole project is two PowerShell scripts plus the Compose stack — nothing e
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `-Model` | `qwen36` | `qwen36`, `heretic`, or `qwen35-9b` |
+| `-Model` | `qwen36` | `qwen36`, `heretic`, `qwen35-9b`, or `qwen35-4b` |
 | `-Context` | `262144` | Total KV context tokens |
 | `-Parallel` | `1` | Concurrent request slots (context is split across them) |
 | `-Thinking` | `$true` | Extended reasoning / `<think>` blocks |
@@ -300,7 +307,7 @@ model (via the `hf` CLI reading `HF_TOKEN` from `.env`), opens the firewall, and
 prunes old Docker layers. Idempotent — re-run it to update.
 
 ```powershell
-.\setup.ps1 [-Model qwen36|heretic|qwen35-9b] [-SkipModel] [-Clean]
+.\setup.ps1 [-Model qwen36|heretic|qwen35-9b|qwen35-4b] [-SkipModel] [-Clean]
 ```
 
 | Parameter | Description |
