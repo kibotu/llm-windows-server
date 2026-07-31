@@ -75,7 +75,7 @@ models:
     mmproj_file: "Qwen3.5-4B-mmproj-BF16.gguf"
     mmproj_include: "*mmproj-BF16*"
     moe: false
-    context: 32768
+    context: 65536
     kv_cache: q4_0
     load_flags: ""
     output_limit: 4000
