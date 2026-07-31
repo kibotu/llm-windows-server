@@ -528,7 +528,10 @@ if (-not (Test-Path $modelPath)) {
     Get-ModelFromHub -Repo $reg.Repo -Include $reg.Include -DestFile $reg.File -Label $reg.Label
 }
 
-$enableVision = if ($null -ne $Vision) { [bool]$Vision } else { $true }
+$enableVision = if ($null -ne $Vision) {
+    if ($Vision -is [string]) { $Vision -notin @("false", "`$false", "0", "off", "no", "") }
+    else { [bool]$Vision }
+} else { $true }
 if ($enableVision -and -not (Test-Path $mmprojPath) -and -not $NoDownload) {
     Get-ModelFromHub -Repo $reg.MmprojRepo -Include $reg.MmprojInclude -DestFile $reg.MmprojFile -Label "vision projector"
 }

@@ -76,12 +76,12 @@ function Write-Watchdog {
 function Build-RunArgs {
     $runArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $RunScript, "-Model", $Model)
     if ($null -ne $Vision) {
-        if ([bool]$Vision) { $runArgs += "-Vision"; $runArgs += "`$true" }
-        else               { $runArgs += "-Vision"; $runArgs += "`$false" }
+        if ([bool]$Vision) { $runArgs += "-Vision:`$true" }
+        else               { $runArgs += "-Vision:`$false" }
     }
     if ($null -ne $Thinking) {
-        if ([bool]$Thinking) { $runArgs += "-Thinking"; $runArgs += "`$true" }
-        else                 { $runArgs += "-Thinking"; $runArgs += "`$false" }
+        if ([bool]$Thinking) { $runArgs += "-Thinking:`$true" }
+        else                 { $runArgs += "-Thinking:`$false" }
     }
     if ($Context -gt 0) {
         $runArgs += "-Context"; $runArgs += $Context.ToString()
