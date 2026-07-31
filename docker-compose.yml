@@ -96,9 +96,7 @@ services:
       --jinja
       --metrics
       ${MOE_FLAGS:-}
-      --no-mmap
-      --mlock
-      --numa distribute
+      ${LOAD_FLAGS:---no-mmap --mlock --numa distribute}
       ${EXTRA_LLAMA_FLAGS:-}
 
   # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@
     Safe to leave running in a terminal or as a scheduled task.
 
 .PARAMETER Model
-    Forwarded to run.ps1 (default: qwen36).
+    Model id or alias from models.yaml, forwarded to run.ps1.
 
 .PARAMETER Vision
     Enable/disable the vision projector (forwarded to run.ps1).
@@ -37,8 +37,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("qwen36", "heretic", "qwen35-9b", "qwen35-4b")]
-    [string]$Model = "qwen36",
+    [string]$Model = "",
 
     [object]$Vision = $null,
 
@@ -74,7 +73,8 @@ function Write-Watchdog {
 }
 
 function Build-RunArgs {
-    $runArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $RunScript, "-Model", $Model)
+    $runArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $RunScript)
+    if ($Model) { $runArgs += "-Model"; $runArgs += $Model }
     if ($null -ne $Vision) {
         if ([bool]$Vision) { $runArgs += "-Vision:`$true" }
         else               { $runArgs += "-Vision:`$false" }

@@ -12,4 +12,4 @@ param([switch]$Wait)
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\Common.ps1"
 
-Switch-AdminModel -Model "qwen36" -Context 262144 -Wait:$Wait
+Switch-AdminModel -Model "qwen36" -Context (Get-ModelDefaultContext "qwen36") -Wait:$Wait

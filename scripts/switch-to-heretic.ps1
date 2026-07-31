@@ -12,4 +12,4 @@ param([switch]$Wait)
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\Common.ps1"
 
-Switch-AdminModel -Model "heretic" -Context 262144 -Wait:$Wait
+Switch-AdminModel -Model "heretic" -Context (Get-ModelDefaultContext "heretic") -Wait:$Wait

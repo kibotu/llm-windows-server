@@ -6,9 +6,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir flask requests
+RUN pip install --no-cache-dir flask requests pyyaml
 
-COPY gateway.py .
+COPY models.yaml model_config.py gateway.py ./
 
 EXPOSE 8899
 

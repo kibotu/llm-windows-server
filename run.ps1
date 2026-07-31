@@ -13,11 +13,11 @@
     at IQ4_XS with vision, reasoning, and MoE experts offloaded to RAM.
 
 .PARAMETER Model
-    "qwen36" (default, 35B MoE + vision), "heretic" (35B Heretic Cerebellum 14GB MoE + vision),
-    "qwen35-9b" (lighter dense + vision), or "qwen35-4b" (tiny dense + vision).
+    Model id or alias from models.yaml. Use aliases like "big", "small", "tiny",
+    or canonical ids like "qwen36", "qwen35-4b". Default: from models.yaml.
 
 .PARAMETER Context
-    Total KV context tokens. Defaults to the model's default (262144 for 35B, 128000 for 9B, 96000 for 4B).
+    Total KV context tokens. Defaults to the model's default from models.yaml.
 
 .PARAMETER Parallel
     Concurrent request slots (default: 1). Context is split across slots.
@@ -69,8 +69,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("qwen36", "heretic", "qwen35-9b", "qwen35-4b")]
-    [string]$Model = "qwen36",
+    [string]$Model = "",
 
     [int]$Context = 0,
 
@@ -87,8 +86,8 @@ param(
 
     [int]$UBatch = 2048,
 
-    [ValidateSet("q4_0", "q8_0", "f16")]
-    [string]$KvCache = "q8_0",
+    [ValidateSet("q4_0", "q8_0", "f16", "")]
+    [string]$KvCache = "",
 
     [ValidatePattern("^(auto|off|all|\d+)$")]
     [string]$MoeOffload = "auto",
@@ -113,53 +112,28 @@ $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUTF8 = "1"
 
 # =============================================================================
-# MODEL CATALOG (must match setup.ps1)
+# MODEL CATALOG — loaded from models.yaml (single source of truth)
 # =============================================================================
-$Models = @{
-    "qwen36" = @{
-        Repo           = "unsloth/Qwen3.6-35B-A3B-GGUF"
-        File           = "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"
-        Include        = "*UD-IQ4_XS*"
-        MmprojRepo     = "unsloth/Qwen3.6-35B-A3B-GGUF"
-        MmprojFile     = "Qwen3.6-35B-A3B-mmproj-BF16.gguf"
-        MmprojInclude  = "*mmproj-BF16*"
-        IsMoe          = $true
-        DefaultContext = 262144
-        Label          = "Qwen3.6-35B-A3B IQ4_XS (vision, MoE)"
+function Load-ModelCatalog {
+    $configPath = Join-Path $ScriptDir "model_config.py"
+    $json = & python $configPath 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Failed to load models.yaml: $json" }
+    return $json | ConvertFrom-Json
+}
+
+$Config = Load-ModelCatalog
+$ValidModelIds = @($Config.models.PSObject.Properties.Name)
+$Config.models.PSObject.Properties | ForEach-Object {
+    $_.Value.aliases | ForEach-Object { $ValidModelIds += $_ }
+}
+
+function Resolve-ModelId {
+    param([string]$Name)
+    if ($Config.models.PSObject.Properties[$Name]) { return $Name }
+    foreach ($prop in $Config.models.PSObject.Properties) {
+        if ($prop.Value.aliases -contains $Name) { return $prop.Name }
     }
-    "heretic" = @{
-        Repo           = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
-        File           = "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf"
-        Include        = "*Heretic-Cerebellum-14GB*"
-        MmprojRepo     = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
-        MmprojFile     = "Qwen3.6-35B-A3B-uncensored-heretic-mmproj-BF16.gguf"
-        MmprojInclude  = "*heretic-mmproj-BF16*"
-        IsMoe          = $true
-        DefaultContext = 262144
-        Label          = "Qwen3.6-35B-A3B Heretic Cerebellum 14GB (vision, MoE)"
-    }
-    "qwen35-9b" = @{
-        Repo           = "unsloth/Qwen3.5-9B-GGUF"
-        File           = "Qwen3.5-9B-Q4_K_M.gguf"
-        Include        = "*Q4_K_M*"
-        MmprojRepo     = "unsloth/Qwen3.5-9B-GGUF"
-        MmprojFile     = "Qwen3.5-9B-mmproj-BF16.gguf"
-        MmprojInclude  = "*mmproj-BF16*"
-        IsMoe          = $false
-        DefaultContext = 128000
-        Label          = "Qwen3.5-9B Q4_K_M (vision, dense)"
-    }
-    "qwen35-4b" = @{
-        Repo           = "bartowski/Qwen_Qwen3.5-4B-GGUF"
-        File           = "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
-        Include        = "*Q4_K_M*"
-        MmprojRepo     = "unsloth/Qwen3.5-4B-GGUF"
-        MmprojFile     = "Qwen3.5-4B-mmproj-BF16.gguf"
-        MmprojInclude  = "*mmproj-BF16*"
-        IsMoe          = $false
-        DefaultContext = 96000
-        Label          = "Qwen3.5-4B Q4_K_M (vision, dense)"
-    }
+    return $null
 }
 
 # =============================================================================
@@ -253,7 +227,7 @@ function Start-DockerDesktop {
 function Write-RuntimeState {
     param(
         [string]$Status,
-        [hashtable]$Reg,
+        $Reg,
         [int]$Context,
         [bool]$Thinking,
         [bool]$EnableVision,
@@ -264,8 +238,8 @@ function Write-RuntimeState {
     $state = [ordered]@{
         status      = $Status
         model       = $Model
-        label       = $Reg.Label
-        model_file  = $Reg.File
+        label       = $Reg.label
+        model_file  = $Reg.file
         context     = $Context
         thinking    = $Thinking
         vision      = $EnableVision
@@ -515,17 +489,25 @@ Write-Ok "Docker is running"
 
 # --- 2. Model ----------------------------------------------------------------
 Write-Step "Model"
-$reg = $Models[$Model]
-if ($Context -le 0) { $Context = $reg.DefaultContext }
+if (-not $Model) { $Model = $Config.default_model }
+$resolved = Resolve-ModelId $Model
+if (-not $resolved) {
+    Write-Err "Unknown model '$Model'. Valid: $($ValidModelIds -join ', ')"
+    exit 1
+}
+$Model = $resolved
+$reg = $Config.models.$Model
+if ($Context -le 0) { $Context = [int]$reg.context }
+if (-not $KvCache) { $KvCache = if ($reg.kv_cache) { $reg.kv_cache } else { "q8_0" } }
 $modelsDir = Join-Path $ScriptDir "models"
 if (-not (Test-Path $modelsDir)) { New-Item -ItemType Directory -Path $modelsDir | Out-Null }
 
-$modelPath  = Join-Path $modelsDir $reg.File
-$mmprojPath = Join-Path $modelsDir $reg.MmprojFile
+$modelPath  = Join-Path $modelsDir $reg.file
+$mmprojPath = Join-Path $modelsDir $reg.mmproj_file
 
 if (-not (Test-Path $modelPath)) {
-    if ($NoDownload) { Write-Err "Model missing: $($reg.File) (remove -NoDownload to fetch it)"; exit 1 }
-    Get-ModelFromHub -Repo $reg.Repo -Include $reg.Include -DestFile $reg.File -Label $reg.Label
+    if ($NoDownload) { Write-Err "Model missing: $($reg.file) (remove -NoDownload to fetch it)"; exit 1 }
+    Get-ModelFromHub -Repo $reg.repo -Include $reg.include -DestFile $reg.file -Label $reg.label
 }
 
 $enableVision = if ($null -ne $Vision) {
@@ -533,14 +515,14 @@ $enableVision = if ($null -ne $Vision) {
     else { [bool]$Vision }
 } else { $true }
 if ($enableVision -and -not (Test-Path $mmprojPath) -and -not $NoDownload) {
-    Get-ModelFromHub -Repo $reg.MmprojRepo -Include $reg.MmprojInclude -DestFile $reg.MmprojFile -Label "vision projector"
+    Get-ModelFromHub -Repo $reg.mmproj_repo -Include $reg.mmproj_include -DestFile $reg.mmproj_file -Label "vision projector"
 }
 if ($enableVision -and -not (Test-Path $mmprojPath)) {
     Write-Warn "Vision projector not available - running without vision"
     $enableVision = $false
 }
 $modelGb = [math]::Round((Get-Item $modelPath).Length / 1GB, 2)
-Write-Ok "$($reg.Label) ($modelGb GB)"
+Write-Ok "$($reg.label) ($modelGb GB)"
 
 # --- 3. Configure ------------------------------------------------------------
 Write-Step "Configuration"
@@ -553,8 +535,9 @@ if ($threadsAuto) {
     else                         { $Threads = [math]::Max(4, [int][math]::Ceiling($logicalCpus / 2.0)) }
 }
 
+$isMoe = [bool]$reg.moe
 $moeFlags = ""
-if ($reg.IsMoe) {
+if ($isMoe) {
     switch ($MoeOffload) {
         "auto" { $moeFlags = "--cpu-moe" }
         "all"  { $moeFlags = "--cpu-moe" }
@@ -564,7 +547,7 @@ if ($reg.IsMoe) {
     if ($Batch -eq 2048 -and $UBatch -eq 2048 -and $MoeOffload -ne "off") { $Batch = 4096; $UBatch = 4096 }
 }
 
-$mmprojFlags = if ($enableVision) { "--mmproj /models/$($reg.MmprojFile)" } else { "" }
+$mmprojFlags = if ($enableVision) { "--mmproj /models/$($reg.mmproj_file)" } else { "" }
 
 Write-Info ("Vision:    " + $(if ($enableVision) { "on" } else { "off" }))
 Write-Info ("Context:   $Context tokens" + $(if ($Parallel -gt 1) { " ($([int]($Context / $Parallel))/slot x $Parallel)" } else { "" }))
@@ -572,9 +555,11 @@ Write-Info ("Reasoning: " + $(if ($Thinking) { "on" } else { "off" }))
 Write-Info ("Threads:   $Threads " + $(if ($threadsAuto) { "(auto from $logicalCpus CPUs)" } else { "(manual)" }))
 Write-Info ("Batch/UB:  $Batch / $UBatch")
 Write-Info ("KV cache:  $KvCache")
-Write-Info ("MoE:       " + $(if ($reg.IsMoe) { if ($moeFlags) { "$MoeOffload (experts->CPU)" } else { "off (full GPU)" } } else { "n/a (dense)" }))
+Write-Info ("MoE:       " + $(if ($isMoe) { if ($moeFlags) { "$MoeOffload (experts->CPU)" } else { "off (full GPU)" } } else { "n/a (dense)" }))
 
-$env:MODEL_FILE        = $reg.File
+$loadFlags = if ($reg.load_flags) { $reg.load_flags } else { "" }
+
+$env:MODEL_FILE        = $reg.file
 $env:MMPROJ_FLAGS      = $mmprojFlags
 $env:CONTEXT_SIZE      = $Context.ToString()
 $env:KV_CACHE_TYPE     = $KvCache
@@ -584,6 +569,7 @@ $env:UBATCH_SIZE       = $UBatch.ToString()
 $env:N_PARALLEL        = $Parallel.ToString()
 $env:REASONING         = if ($Thinking) { "on" } else { "off" }
 $env:MOE_FLAGS         = $moeFlags
+$env:LOAD_FLAGS        = $loadFlags
 $env:EXTRA_LLAMA_FLAGS = $ExtraFlags
 Write-Ok "Environment set"
 
@@ -616,7 +602,7 @@ Write-RuntimeState -Status "ready" -Reg $reg -Context $Context -Thinking $Thinki
 
 # --- Banner ------------------------------------------------------------------
 $localIp = Get-LocalIp
-Write-Banner "SERVER RUNNING" "$($reg.Label)"
+Write-Banner "SERVER RUNNING" "$($reg.label)"
 Write-Host ""
 Write-Host "  Local:  http://localhost:8899/v1" -ForegroundColor White
 Write-Host "  LAN:    http://${localIp}:8899/v1" -ForegroundColor White

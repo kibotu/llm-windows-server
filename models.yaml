@@ -1,0 +1,81 @@
+# =============================================================================
+# Model catalog — single source of truth for all llm-server components.
+#
+# Every model has:
+#   id            Internal key used by CLI (-Model), admin API, and MCP tools.
+#   aliases       Friendly names (used by opencode, switch scripts, etc.).
+#   label         Human-readable description shown in banners and status.
+#   repo/file/include          HuggingFace GGUF download coordinates.
+#   mmproj_repo/mmproj_file/mmproj_include   Vision projector download.
+#   moe           Whether the model is Mixture-of-Experts.
+#   context       Default KV context size (tokens).
+#   kv_cache      Default KV cache quantization (q8_0, q4_0, f16).
+#   load_flags    Extra llama-server flags for memory management.
+#   output_limit  Suggested max output tokens (for client configs).
+#
+# To add a new model: add an entry here and run setup.ps1 -Model <id>.
+# All scripts, the admin API, gateway, and MCP server pick it up automatically.
+# =============================================================================
+
+default_model: qwen36
+
+models:
+  qwen36:
+    aliases: [big]
+    label: "Qwen3.6-35B-A3B IQ4_XS (vision, MoE)"
+    repo: "unsloth/Qwen3.6-35B-A3B-GGUF"
+    file: "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"
+    include: "*UD-IQ4_XS*"
+    mmproj_repo: "unsloth/Qwen3.6-35B-A3B-GGUF"
+    mmproj_file: "Qwen3.6-35B-A3B-mmproj-BF16.gguf"
+    mmproj_include: "*mmproj-BF16*"
+    moe: true
+    context: 262144
+    kv_cache: q8_0
+    load_flags: "--no-mmap --mlock --numa distribute"
+    output_limit: 8000
+
+  heretic:
+    aliases: [heretic]
+    label: "Qwen3.6-35B-A3B Heretic Cerebellum 14GB (vision, MoE)"
+    repo: "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
+    file: "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf"
+    include: "*Heretic-Cerebellum-14GB*"
+    mmproj_repo: "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
+    mmproj_file: "Qwen3.6-35B-A3B-uncensored-heretic-mmproj-BF16.gguf"
+    mmproj_include: "*heretic-mmproj-BF16*"
+    moe: true
+    context: 262144
+    kv_cache: q8_0
+    load_flags: "--no-mmap --mlock --numa distribute"
+    output_limit: 8000
+
+  qwen35-9b:
+    aliases: [small]
+    label: "Qwen3.5-9B Q4_K_M (vision, dense)"
+    repo: "unsloth/Qwen3.5-9B-GGUF"
+    file: "Qwen3.5-9B-Q4_K_M.gguf"
+    include: "*Q4_K_M*"
+    mmproj_repo: "unsloth/Qwen3.5-9B-GGUF"
+    mmproj_file: "Qwen3.5-9B-mmproj-BF16.gguf"
+    mmproj_include: "*mmproj-BF16*"
+    moe: false
+    context: 128000
+    kv_cache: q8_0
+    load_flags: "--no-mmap --mlock --numa distribute"
+    output_limit: 6000
+
+  qwen35-4b:
+    aliases: [tiny]
+    label: "Qwen3.5-4B Q4_K_M (vision, dense)"
+    repo: "bartowski/Qwen_Qwen3.5-4B-GGUF"
+    file: "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+    include: "*Q4_K_M*"
+    mmproj_repo: "unsloth/Qwen3.5-4B-GGUF"
+    mmproj_file: "Qwen3.5-4B-mmproj-BF16.gguf"
+    mmproj_include: "*mmproj-BF16*"
+    moe: false
+    context: 32768
+    kv_cache: q4_0
+    load_flags: ""
+    output_limit: 4000

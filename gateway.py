@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -25,31 +26,26 @@ ADMIN_KEY = os.environ.get("LLAMA_ADMIN_KEY", "").strip() or API_KEY
 # Streamable-HTTP MCP server on the Windows host (mcp/server.py). Reverse-proxied
 # at /mcp so remote clients use one WAN port (:8899) + the admin key for everything.
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://host.docker.internal:8901").rstrip("/")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from model_config import model_catalog_for_api
+
 TRACKING_DIR = "/data"
 REQUESTS_LOG = os.path.join(TRACKING_DIR, "requests.jsonl")
 SUMMARY_FILE = os.path.join(TRACKING_DIR, "daily_summary.json")
 LEGACY_FILE = os.path.join(TRACKING_DIR, "usage_data.json")
 SESSION_GAP_MINUTES = 30
 
-# Used to enrich /v1/models so clients can validate model names before a reload.
-SWITCHABLE_MODELS: Dict[str, Dict[str, Any]] = {
-    "qwen36": {
-        "model_file": "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
-        "default_context": 262144,
-    },
-    "heretic": {
-        "model_file": "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf",
-        "default_context": 262144,
-    },
-    "qwen35-9b": {
-        "model_file": "Qwen3.5-9B-Q4_K_M.gguf",
-        "default_context": 128000,
-    },
-    "qwen35-4b": {
-        "model_file": "Qwen_Qwen3.5-4B-Q4_K_M.gguf",
-        "default_context": 96000,
-    },
-}
+def _build_switchable_models() -> Dict[str, Dict[str, Any]]:
+    """Build switchable models dict from models.yaml."""
+    return {
+        entry["id"]: {
+            "model_file": entry["model_file"],
+            "default_context": entry["default_context"],
+        }
+        for entry in model_catalog_for_api()
+    }
+
+SWITCHABLE_MODELS = _build_switchable_models()
 
 # Thread-safe data storage
 data_lock = threading.Lock()

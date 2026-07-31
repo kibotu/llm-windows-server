@@ -30,9 +30,11 @@ from urllib.parse import urlparse
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUN_PS1 = SCRIPT_DIR / "run.ps1"
 RUNTIME_STATE_FILE = SCRIPT_DIR / "usage_data" / "runtime_state.json"
-VALID_MODELS = frozenset({"qwen36", "heretic", "qwen35-9b", "qwen35-4b"})
 BIND_HOST = os.environ.get("HOST_CONTROLLER_BIND", "127.0.0.1")
 BIND_PORT = int(os.environ.get("HOST_CONTROLLER_PORT", "8900"))
+
+sys.path.insert(0, str(SCRIPT_DIR))
+from model_config import load_models, model_catalog_for_api, resolve_model_id, default_model_id, valid_model_ids
 
 
 def _utc_now() -> str:
@@ -58,28 +60,18 @@ ADMIN_KEY = (
     or _read_dotenv("LLAMA_API_KEY")
 )
 
-MODEL_CATALOG: dict[str, dict[str, Any]] = {
-    "qwen36": {
-        "label": "Qwen3.6-35B-A3B IQ4_XS (vision, MoE)",
-        "model_file": "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
-        "default_context": 262144,
-    },
-    "heretic": {
-        "label": "Qwen3.6-35B-A3B Heretic Cerebellum 14GB (vision, MoE)",
-        "model_file": "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf",
-        "default_context": 262144,
-    },
-    "qwen35-9b": {
-        "label": "Qwen3.5-9B Q4_K_M (vision, dense)",
-        "model_file": "Qwen3.5-9B-Q4_K_M.gguf",
-        "default_context": 128000,
-    },
-    "qwen35-4b": {
-        "label": "Qwen3.5-4B Q4_K_M (vision, dense)",
-        "model_file": "Qwen_Qwen3.5-4B-Q4_K_M.gguf",
-        "default_context": 96000,
-    },
-}
+def _build_model_catalog() -> dict[str, dict[str, Any]]:
+    """Build MODEL_CATALOG dict from models.yaml for backward compat."""
+    return {
+        entry["id"]: {
+            "label": entry["label"],
+            "model_file": entry["model_file"],
+            "default_context": entry["default_context"],
+        }
+        for entry in model_catalog_for_api()
+    }
+
+MODEL_CATALOG = _build_model_catalog()
 
 
 def _write_runtime_state(state: dict[str, Any]) -> None:
@@ -136,12 +128,15 @@ class ReconcileManager:
                     }
                 self._terminate(self._proc)
 
-            model = params.get("model", "qwen36")
-            if model not in VALID_MODELS:
+            model = params.get("model", default_model_id())
+            resolved = resolve_model_id(model)
+            if not resolved:
                 return {
                     "status": "error",
-                    "message": f"Invalid model '{model}'. Valid: {sorted(VALID_MODELS)}",
+                    "message": f"Invalid model '{model}'. Valid: {sorted(valid_model_ids())}",
                 }
+            model = resolved
+            params["model"] = model
 
             cmd = self._build_command(params)
             self._job = {
@@ -440,7 +435,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
 
         if not body.get("model"):
             runtime = _read_runtime_state()
-            body.setdefault("model", runtime.get("model") or "qwen36")
+            body.setdefault("model", runtime.get("model") or default_model_id())
 
         params = {k: v for k, v in body.items() if k != "cancel"}
         cancel = body.get("cancel", True)

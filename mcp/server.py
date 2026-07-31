@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from starlette.responses import JSONResponse
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(REPO_ROOT))
 
 
 def _read_dotenv(key: str) -> str:
@@ -157,8 +159,9 @@ def switch_model(
     wait: bool = True,
     cancel: bool = True,
 ) -> str:
-    """Switch the loaded GGUF model on the Windows host (qwen36, heretic, qwen35-9b, or qwen35-4b).
+    """Switch the loaded GGUF model on the Windows host.
 
+    Accepts any model id or alias from models.yaml (use list_models to see them).
     Cancels any in-flight reconcile by default, then re-runs run.ps1 with the
     requested model. Set wait=false to return immediately after the job is accepted.
     """
@@ -206,9 +209,11 @@ def stop_server() -> str:
 @mcp.tool()
 def list_tools() -> str:
     """List all available MCP tools on this server with their descriptions."""
+    from model_config import valid_model_ids
+    aliases = ", ".join(sorted(valid_model_ids()))
     tools = [
         {"name": "list_tools", "description": "List all available MCP tools on this server with their descriptions."},
-        {"name": "list_models", "description": "List switchable model aliases (qwen36, heretic, qwen35-9b, qwen35-4b)."},
+        {"name": "list_models", "description": f"List switchable model ids and aliases ({aliases})."},
         {"name": "get_server_status", "description": "Get current model, runtime state, job status, and llama.cpp health."},
         {"name": "switch_model", "description": "Switch the loaded GGUF model. Params: model (required), context, thinking, wait, cancel."},
         {"name": "start_server", "description": "Start the llm-server stack (docker compose up). Params: model (optional), context."},

@@ -36,8 +36,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("qwen36", "heretic", "qwen35-9b", "qwen35-4b")]
-    [string]$Model = "qwen36",
+    [string]$Model = "",
 
     [switch]$SkipModel,
 
@@ -52,45 +51,24 @@ try {
 } catch { }
 
 # =============================================================================
-# MODEL CATALOG (must match run.ps1)
+# MODEL CATALOG — loaded from models.yaml (single source of truth)
 # =============================================================================
-$Models = @{
-    "qwen36" = @{
-        Repo          = "unsloth/Qwen3.6-35B-A3B-GGUF"
-        File          = "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"
-        Include       = "*UD-IQ4_XS*"
-        MmprojRepo    = "unsloth/Qwen3.6-35B-A3B-GGUF"
-        MmprojFile    = "Qwen3.6-35B-A3B-mmproj-BF16.gguf"
-        MmprojInclude = "*mmproj-BF16*"
-        Label         = "Qwen3.6-35B-A3B IQ4_XS (vision, MoE, ~17 GB)"
+function Load-ModelCatalog {
+    $configPath = Join-Path $ScriptDir "model_config.py"
+    $json = & python $configPath 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Failed to load models.yaml: $json" }
+    return $json | ConvertFrom-Json
+}
+
+$Config = Load-ModelCatalog
+
+function Resolve-ModelId {
+    param([string]$Name)
+    if ($Config.models.PSObject.Properties[$Name]) { return $Name }
+    foreach ($prop in $Config.models.PSObject.Properties) {
+        if ($prop.Value.aliases -contains $Name) { return $prop.Name }
     }
-    "heretic" = @{
-        Repo          = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
-        File          = "Qwen3.6-35B-A3B-Heretic-Cerebellum-14GB.gguf"
-        Include       = "*Heretic-Cerebellum-14GB*"
-        MmprojRepo    = "deucebucket/Qwen3.6-35B-A3B-Heretic-Cerebellum-GGUF"
-        MmprojFile    = "Qwen3.6-35B-A3B-uncensored-heretic-mmproj-BF16.gguf"
-        MmprojInclude = "*heretic-mmproj-BF16*"
-        Label         = "Qwen3.6-35B-A3B Heretic Cerebellum 14GB (vision, MoE, ~14.5 GB)"
-    }
-    "qwen35-9b" = @{
-        Repo          = "unsloth/Qwen3.5-9B-GGUF"
-        File          = "Qwen3.5-9B-Q4_K_M.gguf"
-        Include       = "*Q4_K_M*"
-        MmprojRepo    = "unsloth/Qwen3.5-9B-GGUF"
-        MmprojFile    = "Qwen3.5-9B-mmproj-BF16.gguf"
-        MmprojInclude = "*mmproj-BF16*"
-        Label         = "Qwen3.5-9B Q4_K_M (vision, dense, ~5 GB)"
-    }
-    "qwen35-4b" = @{
-        Repo          = "bartowski/Qwen_Qwen3.5-4B-GGUF"
-        File          = "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
-        Include       = "*Q4_K_M*"
-        MmprojRepo    = "unsloth/Qwen3.5-4B-GGUF"
-        MmprojFile    = "Qwen3.5-4B-mmproj-BF16.gguf"
-        MmprojInclude = "*mmproj-BF16*"
-        Label         = "Qwen3.5-4B Q4_K_M (vision, dense, ~3 GB)"
-    }
+    return $null
 }
 
 # =============================================================================
@@ -366,10 +344,18 @@ Write-Step "Model download"
 if ($SkipModel) {
     Write-Skip "Skipped (-SkipModel)"
 } else {
-    $m = $Models[$Model]
-    Write-Info "Target: $($m.Label)"
-    Get-ModelFromHub -Repo $m.Repo       -Include $m.Include       -DestFile $m.File       -Label $m.Label
-    Get-ModelFromHub -Repo $m.MmprojRepo -Include $m.MmprojInclude -DestFile $m.MmprojFile -Label "vision projector"
+    if (-not $Model) { $Model = $Config.default_model }
+    $resolved = Resolve-ModelId $Model
+    if (-not $resolved) {
+        $validIds = @($Config.models.PSObject.Properties.Name)
+        Write-Err "Unknown model '$Model'. Valid: $($validIds -join ', ')"
+        exit 1
+    }
+    $Model = $resolved
+    $m = $Config.models.$Model
+    Write-Info "Target: $($m.label)"
+    Get-ModelFromHub -Repo $m.repo       -Include $m.include       -DestFile $m.file       -Label $m.label
+    Get-ModelFromHub -Repo $m.mmproj_repo -Include $m.mmproj_include -DestFile $m.mmproj_file -Label "vision projector"
 }
 
 # --- 8. Firewall -------------------------------------------------------------
@@ -411,10 +397,12 @@ Write-Ok "Cleanup done"
 # --- Summary -----------------------------------------------------------------
 Write-Banner "Setup complete" "Start the server below"
 Write-Host ""
-Write-Host "  .\run.ps1                     # start default ($($Models[$Model].Label))" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Model heretic      # Heretic Cerebellum 14GB" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Model qwen35-9b    # lighter model" -ForegroundColor Gray
-Write-Host "  .\run.ps1 -Model qwen35-4b    # tiny model" -ForegroundColor Gray
+$defaultLabel = $Config.models.($Config.default_model).label
+Write-Host "  .\run.ps1                     # start default ($defaultLabel)" -ForegroundColor Gray
+foreach ($prop in $Config.models.PSObject.Properties) {
+    $id = $prop.Name; $aliases = ($prop.Value.aliases -join "/")
+    Write-Host "  .\run.ps1 -Model $($id.PadRight(14)) # $aliases — $($prop.Value.label)" -ForegroundColor Gray
+}
 Write-Host "  .\run.ps1 -Stop               # stop the server" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  API:      http://localhost:$ServerPort/v1" -ForegroundColor White

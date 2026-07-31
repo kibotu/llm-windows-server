@@ -1,6 +1,34 @@
 # Shared helpers for llm-server admin API scripts (Windows / PowerShell).
 
 $Script:AdminConfigLoaded = $false
+$Script:ModelConfig = $null
+
+function Load-ModelConfig {
+    if ($Script:ModelConfig) { return $Script:ModelConfig }
+    $configPy = Join-Path (Get-AdminRepoRoot) "model_config.py"
+    $json = & python $configPy 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Failed to load models.yaml: $json" }
+    $Script:ModelConfig = $json | ConvertFrom-Json
+    return $Script:ModelConfig
+}
+
+function Resolve-ModelId {
+    param([string]$Name)
+    $cfg = Load-ModelConfig
+    if ($cfg.models.PSObject.Properties[$Name]) { return $Name }
+    foreach ($prop in $cfg.models.PSObject.Properties) {
+        if ($prop.Value.aliases -contains $Name) { return $prop.Name }
+    }
+    return $null
+}
+
+function Get-ModelDefaultContext {
+    param([string]$ModelId)
+    $cfg = Load-ModelConfig
+    $resolved = Resolve-ModelId $ModelId
+    if (-not $resolved) { return 0 }
+    return [int]$cfg.models.$resolved.context
+}
 
 function Get-AdminRepoRoot {
     $root = Split-Path -Parent $PSScriptRoot
