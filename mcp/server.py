@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -76,7 +76,7 @@ MCP_HOST = os.environ.get("MCP_BIND_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("MCP_BIND_PORT", "8901"))
 MCP_TRANSPORT = (os.environ.get("MCP_TRANSPORT") or "streamable-http").strip()
 
-mcp = FastMCP("llm-server", host=MCP_HOST, port=MCP_PORT)
+mcp = MCPServer("llm-server")
 
 
 def _headers() -> dict[str, str]:
@@ -235,4 +235,4 @@ if __name__ == "__main__":
         print(f"Host controller: {HOST_CONTROLLER_URL}")
         print(f"Gateway: {GATEWAY_URL}")
         print(f"Admin auth: {'ENABLED' if ADMIN_KEY else 'disabled (open)'}")
-    mcp.run(transport=transport)
+    mcp.run(transport=transport, host=MCP_HOST, port=MCP_PORT)

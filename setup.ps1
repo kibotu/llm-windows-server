@@ -6,15 +6,17 @@
     Idempotent. Safe to run any number of times - the first run installs
     everything, later runs update it. Each step is skipped if already done.
 
+      0. Pre-flight           verify Docker, Python, uv, Git are available
       1. Docker Desktop        install (winget) + start
       2. GPU access            verify NVIDIA runtime inside Docker
       3. Hugging Face CLI      install/upgrade latest 'hf' + login from .env
       4. Server API key        generate a random key into .env (if missing)
       5. llama.cpp image       pull the latest image tag from docker-compose.yml
       6. gateway proxy        (re)build from this repo's Dockerfile
-      7. Model                 download GGUF + vision projector into .\models\
-      8. Firewall              open the server port for LAN access
-      9. Cleanup               prune dangling Docker layers (models untouched)
+      7. MCP dependencies     pre-install MCP Python packages via uv
+      8. Model                 download GGUF + vision projector into .\models\
+      9. Firewall              open the server port for LAN access
+     10. Cleanup               prune dangling Docker layers (models untouched)
 
 .PARAMETER Model
     Which model to ensure is downloaded: "qwen36" (default), "heretic", "qwen35-9b", or "qwen35-4b".
@@ -45,17 +47,69 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-try { 
+try {
     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
     $OutputEncoding = [System.Text.UTF8Encoding]::new()
 } catch { }
 
 # =============================================================================
-# MODEL CATALOG — loaded from models.yaml (single source of truth)
+# ELEVATION — re-launch elevated if needed (Docker install, firewall, hardlinks)
+# =============================================================================
+function Test-Admin {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Test-DeveloperMode {
+    try {
+        $dm = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" -Name "AllowDevelopmentWithoutDevLicense" -ErrorAction Stop
+        return ($dm.AllowDevelopmentWithoutDevLicense -eq 1)
+    } catch {
+        return $false
+    }
+}
+
+$isAdmin = Test-Admin
+$devMode = Test-DeveloperMode
+
+# If not elevated and Docker is missing (needs winget install), re-launch elevated
+if (-not $isAdmin) {
+    $dockerFound = Get-Command docker -ErrorAction SilentlyContinue
+    if (-not $dockerFound) {
+        $dockerBin = @("D:\Docker\resources\bin", "C:\Program Files\Docker\Docker\resources\bin") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $dockerBin) {
+            Write-Host ""
+            Write-Host "  Docker Desktop is not installed and requires Administrator to install." -ForegroundColor Yellow
+            Write-Host "  Re-launching setup as Administrator..." -ForegroundColor Cyan
+            Write-Host ""
+            $elevatedArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+            foreach ($key in $PSBoundParameters.Keys) {
+                $val = $PSBoundParameters[$key]
+                if ($val -is [switch] -and $val) { $elevatedArgs += " -$key" }
+                elseif ($val) { $elevatedArgs += " -$key `"$val`"" }
+            }
+            Start-Process powershell -Verb RunAs -ArgumentList $elevatedArgs
+            exit
+        }
+    }
+}
+
+    if (-not $devMode -and -not $isAdmin) {
+        Write-Host ""
+        Write-Host "  [info] Developer Mode is OFF and not running as Administrator." -ForegroundColor Yellow
+        Write-Host "         Hardlinks will fall back to file copies (works, just uses more disk)." -ForegroundColor Yellow
+        Write-Host ('         To enable hardlinks: Settings > System > For developers > Developer Mode') -ForegroundColor DarkGray
+        Write-Host ""
+    }
+
+# =============================================================================
+# MODEL CATALOG - loaded from models.yaml (single source of truth)
 # =============================================================================
 function Load-ModelCatalog {
     $configPath = Join-Path $ScriptDir "model_config.py"
-    $json = & python $configPath 2>&1
+    $json = & uv run --with pyyaml python $configPath 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Failed to load models.yaml: $json" }
     return $json | ConvertFrom-Json
 }
@@ -75,7 +129,7 @@ function Resolve-ModelId {
 # TUI
 # =============================================================================
 $script:Step = 0
-$script:StepTotal = 9
+$script:StepTotal = 11
 $EnvFile   = Join-Path $ScriptDir ".env"
 $ModelsDir = Join-Path $ScriptDir "models"
 $LogsDir   = Join-Path $ScriptDir "logs"
@@ -159,6 +213,7 @@ function Start-DockerDesktop {
 }
 
 function Get-HfCommand {
+    # Prefer 'hf' (standalone CLI), fall back to 'huggingface-cli' (from huggingface_hub)
     $hf = Get-Command hf -ErrorAction SilentlyContinue
     if (-not $hf) { $hf = Get-Command huggingface-cli -ErrorAction SilentlyContinue }
     return $hf
@@ -193,43 +248,156 @@ function Ensure-UsageDataStorage {
     }
 }
 
+function Get-HfCacheDir {
+    # Resolve the HF cache directory: respect HF_HOME, then default
+    if ($env:HF_HOME) {
+        $hubCache = Join-Path $env:HF_HOME "hub"
+        if (Test-Path $hubCache) { return $hubCache }
+    }
+    $default = Join-Path $env:USERPROFILE ".cache\huggingface\hub"
+    if (Test-Path $default) { return $default }
+    # If neither exists, return the default (create on first download)
+    return $default
+}
+
+function Find-HfCacheFile {
+    param([string]$Repo, [string]$Include)
+    $hubCache = Get-HfCacheDir
+    if (-not (Test-Path $hubCache)) { return $null }
+
+    $repoDir = "models--" + ($Repo -replace "/", "--")
+    $repoPath = Join-Path $hubCache $repoDir
+    if (-not (Test-Path $repoPath)) { return $null }
+
+    $snapshots = Join-Path $repoPath "snapshots"
+    if (-not (Test-Path $snapshots)) { return $null }
+
+    $latest = Get-ChildItem $snapshots -Directory -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $latest) { return $null }
+
+    return Get-ChildItem $latest.FullName -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like $Include } | Select-Object -First 1
+}
+
+function New-HardlinkOrCopy {
+    param([string]$LinkPath, [string]$TargetPath)
+    if (Test-Path $LinkPath) {
+        $item = Get-Item $LinkPath -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            Remove-Item $LinkPath -Force -ErrorAction SilentlyContinue
+        } else {
+            cmd /c "del /f /q `"$LinkPath`"" 2>$null
+        }
+    }
+    $resolved = $TargetPath
+    $srcItem = Get-Item $TargetPath -Force -ErrorAction SilentlyContinue
+    if ($srcItem -and ($srcItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        $chain = cmd /c "dir `"$TargetPath`"" 2>$null | Select-String '\[([^\]]+)\]$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+        if ($chain) {
+            $resolved = $chain
+            if (-not [System.IO.Path]::IsPathRooted($chain)) {
+                $resolved = Join-Path (Split-Path $TargetPath -Parent) $chain
+            }
+        }
+    }
+    $null = fsutil hardlink create `"$LinkPath`" `"$resolved`" 2>&1
+    if (Test-Path $LinkPath) { return $true }
+    Copy-Item -LiteralPath $resolved -Destination $LinkPath -Force
+    return (Test-Path $LinkPath)
+}
+
 function Get-ModelFromHub {
     param([string]$Repo, [string]$Include, [string]$DestFile, [string]$Label)
 
     $destPath = Join-Path $ModelsDir $DestFile
+
+    # Check if a valid file already exists and is readable
     if (Test-Path $destPath) {
-        $gb = [math]::Round((Get-Item $destPath).Length / 1GB, 2)
-        Write-Skip "$Label already present ($gb GB)"
-        return
+        $item = Get-Item $destPath -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            # Convert symlinks to hardlinks (Docker WSL2 can't follow symlinks)
+            $resolved = $destPath
+            for ($i = 0; $i -lt 10; $i++) {
+                $raw = cmd /c "dir `"$resolved`"" 2>$null | Select-String '\[([^\]]+)\]$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+                if (-not $raw) { break }
+                $next = $raw
+                if (-not [System.IO.Path]::IsPathRooted($raw)) {
+                    $next = Join-Path (Split-Path $resolved -Parent) $raw
+                }
+                $resolved = $next
+                $nextItem = Get-Item $resolved -Force -ErrorAction SilentlyContinue
+                if (-not $nextItem -or -not ($nextItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { break }
+            }
+            if ($resolved -ne $destPath -and (Test-Path $resolved)) {
+                Remove-Item $destPath -Force -ErrorAction SilentlyContinue
+                $null = fsutil hardlink create `"$destPath`" `"$resolved`" 2>&1
+                if (-not (Test-Path $destPath)) {
+                    Copy-Item -LiteralPath $resolved -Destination $destPath -Force
+                }
+            }
+        }
+        try {
+            $item = Get-Item $destPath -Force
+            $null = [System.IO.File]::OpenRead($item.FullName).Dispose()
+            $gb = [math]::Round($item.Length / 1GB, 2)
+            Write-Skip "$Label already present ($gb GB)"
+            return
+        } catch {
+            Write-Warn "Existing $Label unreadable, re-downloading..."
+        }
     }
 
+    # Check HF cache first (avoids re-downloading if already cached)
+    $cached = Find-HfCacheFile -Repo $Repo -Include $Include
+    if ($cached) {
+        Write-Info "Found $Label in HF cache, linking..."
+        $ok = New-HardlinkOrCopy -LinkPath $destPath -TargetPath $cached.FullName
+        if ($ok) {
+            $gb = [math]::Round((Get-Item $destPath -Force).Length / 1GB, 2)
+            $method = if ((Get-Item $destPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { "symlinked" } else { "hardlinked" }
+            Write-Ok "$Label ($gb GB, $method from HF cache)"
+            return
+        }
+        Write-Warn "Link failed, downloading fresh..."
+    }
+
+    # Download to default HF cache
     Write-Info "Downloading $Label from $Repo ..."
     $hf = Get-HfCommand
-    $tmp = Join-Path $env:TEMP ("hf_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    if (-not $hf) {
+        throw "'hf' CLI not found. Ensure 'uv' is installed and run: uv tool install --force hf"
+    }
+
     $env:PYTHONIOENCODING = "utf-8"
     $env:PYTHONUTF8 = "1"
     $env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
     Remove-Item Env:HF_HUB_ENABLE_HF_TRANSFER -ErrorAction SilentlyContinue
 
-    & $hf.Name download $Repo --include $Include --local-dir $tmp 2>&1 | Out-Null
-    $dlExit = $LASTEXITCODE
-
-    $file = Get-ChildItem $tmp -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like $DestFile } | Select-Object -First 1
-    if (-not $file) {
-        $file = Get-ChildItem $tmp -Recurse -File -Filter "*.gguf" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-    }
-    if (-not $file) {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-        if ($dlExit -ne 0) { throw "Download failed for $Repo (pattern $Include)" }
-        throw "No matching file found in download for $Label"
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try {
+        $dlOutput = & $hf.Name download $Repo --include $Include 2>&1 | Out-String
+        $dlExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
     }
 
-    Move-Item $file.FullName $destPath -Force
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    $gb = [math]::Round((Get-Item $destPath).Length / 1GB, 2)
-    Write-Ok "$Label -> models\$DestFile ($gb GB)"
+    if ($dlExit -ne 0) {
+        Write-Err "Download output:"
+        $dlOutput -split "`n" | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
+        throw "Download failed for $Repo (exit $dlExit, pattern: $Include)"
+    }
+
+    # Find the downloaded file in the HF cache
+    $cached = Find-HfCacheFile -Repo $Repo -Include $Include
+    if (-not $cached) {
+        throw "Download succeeded but no matching file found in HF cache for $Label (pattern: $Include)"
+    }
+
+    $ok = New-HardlinkOrCopy -LinkPath $destPath -TargetPath $cached.FullName
+    $gb = [math]::Round((Get-Item $destPath -Force).Length / 1GB, 2)
+    $method = if ((Get-Item $destPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { "symlinked" } else { "hardlinked" }
+    Write-Ok "$Label ($gb GB, $method from HF cache)"
 }
 
 # =============================================================================
@@ -244,6 +412,31 @@ if (-not (Test-Path $EnvFile)) {
     $example = Join-Path $ScriptDir ".env.example"
     if (Test-Path $example) { Copy-Item $example $EnvFile }
 }
+
+# --- 0. Pre-flight checks ----------------------------------------------------
+Write-Step "Pre-flight checks"
+$missing = @()
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    # Check common Docker Desktop install paths before giving up
+    $dockerBin = @("D:\Docker\resources\bin", "C:\Program Files\Docker\Docker\resources\bin") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $dockerBin) { $missing += "Docker Desktop" }
+}
+if (-not (Get-Command python -ErrorAction SilentlyContinue) -and -not (Get-Command python3 -ErrorAction SilentlyContinue)) {
+    $missing += "Python 3 (install from https://python.org or winget install Python.Python.3.12)"
+}
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    $missing += "uv (install: powershell -ExecutionPolicy ByPass -c 'irm https://astral.sh/uv/install.ps1 | iex')"
+}
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    $missing += "Git (install: winget install Git.Git)"
+}
+if ($missing.Count -gt 0) {
+    Write-Err "Missing prerequisites:"
+    $missing | ForEach-Object { Write-Host "        - $_" -ForegroundColor Yellow }
+    exit 1
+}
+Write-Ok "Docker, Python, uv, Git all found"
 
 # --- 1. Docker Desktop -------------------------------------------------------
 Write-Step "Docker Desktop"
@@ -274,7 +467,7 @@ try {
 if ($gpuExit -ne 0) {
     Write-Err "GPU not accessible inside Docker. Check:"
     Write-Info "nvidia-smi works on the host"
-    Write-Info "Docker Desktop > Settings > Resources > WSL Integration is enabled"
+    Write-Info ('Docker Desktop > Settings > Resources > WSL Integration is enabled')
     Write-Host $gpu -ForegroundColor DarkGray
     exit 1
 }
@@ -283,14 +476,18 @@ Write-Ok ("GPU visible: " + $(if ($gpuName) { $gpuName.ToString().Trim() } else 
 
 # --- 3. Hugging Face CLI -----------------------------------------------------
 Write-Step "Hugging Face CLI"
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-    Write-Err "Python not found. Install Python 3, then re-run."
+Write-Info "Ensuring 'hf' CLI is installed via uv..."
+$prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+try {
+    uv tool install --force hf 2>&1 | Out-Null
+} finally {
+    $ErrorActionPreference = $prevEap
+}
+$hf = Get-HfCommand
+if (-not $hf) {
+    Write-Err "'hf' CLI not found after install. Try: uv tool install --force hf"
     exit 1
 }
-Write-Info "Ensuring latest 'hf' CLI (huggingface_hub + hf_transfer)..."
-python -m pip install --quiet --upgrade huggingface_hub hf_transfer
-$hf = Get-HfCommand
-if (-not $hf) { Write-Err "'hf' CLI still not on PATH after install."; exit 1 }
 $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 try {
     $hfVersion = (& $hf.Name version 2>&1 | Out-String).Trim()
@@ -339,7 +536,29 @@ Ensure-UsageDataStorage
 Invoke-Compose @("build", "--pull", "gateway")
 Write-Ok "Gateway image built"
 
-# --- 7. Model ----------------------------------------------------------------
+# --- 7. MCP server dependencies -----------------------------------------------
+Write-Step "MCP server dependencies"
+$reqFile = Join-Path $ScriptDir "mcp\requirements.txt"
+if (-not (Test-Path $reqFile)) {
+    Write-Skip "mcp/requirements.txt not found"
+} else {
+    Write-Info "Pre-installing MCP Python packages via uv..."
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try {
+        $out = & uv run --with-requirements $reqFile python -c "import mcp, httpx, uvicorn, yaml; print('ok')" 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    if ($exitCode -eq 0) {
+        Write-Ok "MCP dependencies cached (mcp, httpx, uvicorn, pyyaml)"
+    } else {
+        Write-Warn "Could not pre-install MCP deps (exit $exitCode). run.ps1 will retry on start."
+        if ($out) { $out -split "`n" | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray } }
+    }
+}
+
+# --- 8. Model ----------------------------------------------------------------
 Write-Step "Model download"
 if ($SkipModel) {
     Write-Skip "Skipped (-SkipModel)"
@@ -358,29 +577,35 @@ if ($SkipModel) {
     Get-ModelFromHub -Repo $m.mmproj_repo -Include $m.mmproj_include -DestFile $m.mmproj_file -Label "vision projector"
 }
 
-# --- 8. Firewall -------------------------------------------------------------
+# --- 9. Firewall -------------------------------------------------------------
 Write-Step "Windows Firewall"
-$ruleName = "LLM Server Port $ServerPort"
-if (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue) {
-    Write-Skip "Rule '$ruleName' already exists"
+if (-not $isAdmin) {
+    Write-Skip "Not running as Administrator -- skipping firewall rule"
+    Write-Info "To allow LAN access, run once as Administrator or add manually:"
+    Write-Info "  netsh advfirewall firewall add rule name=""LLM Server Port $ServerPort"" dir=in action=allow protocol=TCP localport=$ServerPort"
 } else {
-    $prevEap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
-    try {
-        $result = New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP `
-            -LocalPort $ServerPort -Action Allow -Profile Any -Enabled True 2>&1
-        if ($result -and -not ($result -match "Access is denied")) {
-            Write-Ok "Opened inbound TCP $ServerPort"
-        } else {
-            Write-Warn "Could not add rule (run as Administrator for LAN access)"
+    $ruleName = "LLM Server Port $ServerPort"
+    if (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue) {
+        Write-Skip "Rule '$ruleName' already exists"
+    } else {
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = "SilentlyContinue"
+        try {
+            $result = New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP `
+                -LocalPort $ServerPort -Action Allow -Profile Any -Enabled True 2>&1
+            if ($result -and -not ($result -match "Access is denied")) {
+                Write-Ok "Opened inbound TCP $ServerPort"
+            } else {
+                Write-Warn "Could not add rule"
+            }
+        } catch {
+            Write-Warn "Could not add rule"
+        } finally {
+            $ErrorActionPreference = $prevEap
         }
-    } catch {
-        Write-Warn "Could not add rule (run as Administrator for LAN access)"
-    } finally {
-        $ErrorActionPreference = $prevEap
     }
 }
 
-# --- 9. Cleanup --------------------------------------------------------------
+# --- 10. Cleanup -------------------------------------------------------------
 Write-Step "Docker cleanup"
 $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 try {
@@ -397,11 +622,16 @@ Write-Ok "Cleanup done"
 # --- Summary -----------------------------------------------------------------
 Write-Banner "Setup complete" "Start the server below"
 Write-Host ""
+    if (-not $isAdmin -and -not $devMode) {
+        Write-Host "  [note] Models were copied (not hardlinked). Enable Developer Mode for hardlinks:" -ForegroundColor Yellow
+        Write-Host ('         Settings > System > For developers > Developer Mode') -ForegroundColor DarkGray
+        Write-Host ""
+    }
 $defaultLabel = $Config.models.($Config.default_model).label
 Write-Host "  .\run.ps1                     # start default ($defaultLabel)" -ForegroundColor Gray
 foreach ($prop in $Config.models.PSObject.Properties) {
     $id = $prop.Name; $aliases = ($prop.Value.aliases -join "/")
-    Write-Host "  .\run.ps1 -Model $($id.PadRight(14)) # $aliases — $($prop.Value.label)" -ForegroundColor Gray
+    Write-Host "  .\run.ps1 -Model $($id.PadRight(14)) # $aliases - $($prop.Value.label)" -ForegroundColor Gray
 }
 Write-Host "  .\run.ps1 -Stop               # stop the server" -ForegroundColor Gray
 Write-Host ""

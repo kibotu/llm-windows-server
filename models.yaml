@@ -79,3 +79,27 @@ models:
     kv_cache: q4_0
     load_flags: ""
     output_limit: 4000
+
+  qwen38-27b-iq4xs:
+    aliases: [qwen38iq4xs]
+    label: "Qwen3.8-27B-Uncensored IQ4_XS (MTP)"
+    repo: "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+    file: "Qwen3.8-27B-Uncensored-IQ4_XS.gguf"
+    include: "*IQ4_XS*"
+    moe: false
+    context: 262144
+    kv_cache: q8_0
+    load_flags: "--no-mmap --mlock --numa distribute"
+    output_limit: 8000
+
+  qwen38-27b-q5km:
+    aliases: [qwen38q5km]
+    label: "Qwen3.8-27B-Uncensored Q5_K_M (MTP)"
+    repo: "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+    file: "Qwen3.8-27B-Uncensored-Q5_K_M.gguf"
+    include: "*Q5_K_M*"
+    moe: false
+    context: 262144
+    kv_cache: q8_0
+    load_flags: "--no-mmap --mlock --numa distribute"
+    output_limit: 8000
