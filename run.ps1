@@ -524,8 +524,9 @@ function Get-ModelFromHub {
     if ($token -and $token -ne "hf_xxx" -and -not $env:HF_TOKEN) { $env:HF_TOKEN = $token }
     $env:PYTHONIOENCODING = "utf-8"
     $env:PYTHONUTF8 = "1"
-    $env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
+    Remove-Item Env:TQDM_POSITION -ErrorAction SilentlyContinue
     Remove-Item Env:HF_HUB_ENABLE_HF_TRANSFER -ErrorAction SilentlyContinue
+    Remove-Item Env:HF_HUB_DISABLE_PROGRESS_BARS -ErrorAction SilentlyContinue
 
     $cached = Find-HfCacheFile -Repo $Repo -Include $Include
     if ($cached) {
@@ -540,15 +541,13 @@ function Get-ModelFromHub {
     Write-Info "Downloading $Label from $Repo ..."
     $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try {
-        $dlOutput = & $hf.Name download $Repo --include $Include 2>&1 | Out-String
+        & $hf.Source download $Repo --include $Include
         $dlExit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEap
     }
 
     if ($dlExit -ne 0) {
-        Write-Err "Download output:"
-        $dlOutput -split "`n" | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
         throw "Download failed for $Repo (exit $dlExit, pattern: $Include)"
     }
 

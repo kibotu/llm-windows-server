@@ -80,12 +80,45 @@ models:
     load_flags: ""
     output_limit: 4000
 
+  qwen38-27b-iq2m:
+    aliases: [qwen38iq2m]
+    label: "Qwen3.8-27B-Uncensored IQ2_M (vision, MTP)"
+    repo: "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+    file: "Qwen3.8-27B-Uncensored-IQ2_M.gguf"
+    include: "*IQ2_M*"
+    mmproj_repo: "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+    mmproj_file: "Qwen3.8-27B-Uncensored-vision-f16.gguf"
+    mmproj_include: "*vision-f16*"
+    moe: false
+    context: 262144
+    kv_cache: q8_0
+    load_flags: "--no-mmap --mlock --numa distribute"
+    output_limit: 8000
+
   qwen38-27b-iq4xs:
     aliases: [qwen38iq4xs]
-    label: "Qwen3.8-27B-Uncensored IQ4_XS (MTP)"
+    label: "Qwen3.8-27B-Uncensored IQ4_XS (vision, MTP)"
     repo: "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
     file: "Qwen3.8-27B-Uncensored-IQ4_XS.gguf"
     include: "*IQ4_XS*"
+    mmproj_repo: "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+    mmproj_file: "Qwen3.8-27B-Uncensored-vision-f16.gguf"
+    mmproj_include: "*vision-f16*"
+    moe: false
+    context: 262144
+    kv_cache: q8_0
+    load_flags: "--no-mmap --mlock --numa distribute"
+    output_limit: 8000
+
+  qwen38-27b-q4km:
+    aliases: [qwen38q4km]
+    label: "Qwen3.8-27B-Uncensored Q4_K_M (vision, MTP)"
+    repo: "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+    file: "Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
+    include: "*Q4_K_M*"
+    mmproj_repo: "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+    mmproj_file: "Qwen3.8-27B-Uncensored-vision-f16.gguf"
+    mmproj_include: "*vision-f16*"
     moe: false
     context: 262144
     kv_cache: q8_0
@@ -94,10 +127,13 @@ models:
 
   qwen38-27b-q5km:
     aliases: [qwen38q5km]
-    label: "Qwen3.8-27B-Uncensored Q5_K_M (MTP)"
+    label: "Qwen3.8-27B-Uncensored Q5_K_M (vision, MTP)"
     repo: "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
     file: "Qwen3.8-27B-Uncensored-Q5_K_M.gguf"
     include: "*Q5_K_M*"
+    mmproj_repo: "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"
+    mmproj_file: "Qwen3.8-27B-Uncensored-vision-f16.gguf"
+    mmproj_include: "*vision-f16*"
     moe: false
     context: 262144
     kv_cache: q8_0

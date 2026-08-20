@@ -371,20 +371,19 @@ function Get-ModelFromHub {
 
     $env:PYTHONIOENCODING = "utf-8"
     $env:PYTHONUTF8 = "1"
-    $env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
+    Remove-Item Env:TQDM_POSITION -ErrorAction SilentlyContinue
     Remove-Item Env:HF_HUB_ENABLE_HF_TRANSFER -ErrorAction SilentlyContinue
+    Remove-Item Env:HF_HUB_DISABLE_PROGRESS_BARS -ErrorAction SilentlyContinue
 
     $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try {
-        $dlOutput = & $hf.Name download $Repo --include $Include 2>&1 | Out-String
+        & $hf.Source download $Repo --include $Include
         $dlExit = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prevEap
     }
 
     if ($dlExit -ne 0) {
-        Write-Err "Download output:"
-        $dlOutput -split "`n" | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
         throw "Download failed for $Repo (exit $dlExit, pattern: $Include)"
     }
 
@@ -490,7 +489,7 @@ if (-not $hf) {
 }
 $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 try {
-    $hfVersion = (& $hf.Name version 2>&1 | Out-String).Trim()
+    $hfVersion = (& $hf.Source version 2>&1 | Out-String).Trim()
 } finally {
     $ErrorActionPreference = $prevEap
 }
@@ -501,7 +500,7 @@ if ($token -and $token -ne "hf_xxx") {
     $env:HF_TOKEN = $token
     $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try {
-        & $hf.Name auth login --token $token --add-to-git-credential 2>&1 | Out-Null
+        & $hf.Source auth login --token $token --add-to-git-credential 2>&1 | Out-Null
         Write-Ok "Authenticated with Hugging Face (token from .env)"
     } catch {
         Write-Warn "HF auth login had warnings, but token is set"
@@ -573,8 +572,12 @@ if ($SkipModel) {
     $Model = $resolved
     $m = $Config.models.$Model
     Write-Info "Target: $($m.label)"
-    Get-ModelFromHub -Repo $m.repo       -Include $m.include       -DestFile $m.file       -Label $m.label
-    Get-ModelFromHub -Repo $m.mmproj_repo -Include $m.mmproj_include -DestFile $m.mmproj_file -Label "vision projector"
+    Get-ModelFromHub -Repo $m.repo -Include $m.include -DestFile $m.file -Label $m.label
+    if ($m.mmproj_repo -and $m.mmproj_include -and $m.mmproj_file) {
+        Get-ModelFromHub -Repo $m.mmproj_repo -Include $m.mmproj_include -DestFile $m.mmproj_file -Label "vision projector"
+    } else {
+        Write-Info "No vision projector defined for this model, skipping"
+    }
 }
 
 # --- 9. Firewall -------------------------------------------------------------
