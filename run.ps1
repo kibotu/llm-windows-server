@@ -9,8 +9,8 @@
     Face. The script stays in the foreground streaming logs; Ctrl+C stops
     streaming but leaves the server running. Use -Stop to tear it down.
 
-    Defaults target an RTX 4080 16 GB + 96 GB DDR5 box running Qwen3.6-35B-A3B
-    at IQ4_XS with vision, reasoning, and MoE experts offloaded to RAM.
+    Defaults target an RTX 4080 16 GB + 96 GB DDR5 box running Qwen3.8-27B IQ2_M
+    with KV offload, repack, and context checkpoints enabled.
 
 .PARAMETER Model
     Model id or alias from models.yaml. Use aliases like "big", "small", "tiny",
@@ -42,6 +42,21 @@
 
 .PARAMETER MoeOffload
     Expert offload: "auto"/"all" (experts to CPU), "off" (full GPU), or N (first N layers).
+
+.PARAMETER KvOffload
+    Offload KV cache to GPU (default: off unless model specifies).
+
+.PARAMETER Repack
+    Repack quantized weights for better GPU utilization (default: off unless model specifies).
+
+.PARAMETER CacheRam
+    RAM cache size in MB for context persistence (default: 0 = off unless model specifies).
+
+.PARAMETER CtxCheckpoints
+    Number of context checkpoints for long-context optimization (default: 0 = off unless model specifies).
+
+.PARAMETER CheckpointMinStep
+    Minimum token step between context checkpoints (default: 0 = off unless model specifies).
 
 .PARAMETER ExtraFlags
     Extra flags appended verbatim to llama-server.
@@ -86,11 +101,23 @@ param(
 
     [int]$UBatch = 2048,
 
+    [int]$Ngl = 99,
+
     [ValidateSet("q4_0", "q8_0", "f16", "")]
     [string]$KvCache = "",
 
     [ValidatePattern("^(auto|off|all|\d+)$")]
     [string]$MoeOffload = "auto",
+
+    [switch]$KvOffload,
+
+    [switch]$Repack,
+
+    [int]$CacheRam = 0,
+
+    [int]$CtxCheckpoints = 0,
+
+    [int]$CheckpointMinStep = 0,
 
     [string]$ExtraFlags = "",
 
@@ -408,7 +435,7 @@ function Ensure-McpServer {
     $logDir = Split-Path $logFile -Parent
     if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
     $proc = Start-Process -FilePath "uv" -ArgumentList $uvArgs -WorkingDirectory $ScriptDir `
-        -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err" -PassThru
+        -WindowStyle Hidden -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err" -PassThru
     $deadline = (Get-Date).AddSeconds(15)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 500
@@ -675,33 +702,56 @@ if ($isMoe) {
         "off"  { $moeFlags = "" }
         default { if ($MoeOffload -match '^\d+$') { $moeFlags = "--n-cpu-moe $MoeOffload" } }
     }
-    if ($Batch -eq 2048 -and $UBatch -eq 2048 -and $MoeOffload -ne "off") { $Batch = 4096; $UBatch = 4096 }
 }
 
+# Use model-specific batch sizes if user hasn't overridden
+if ($Batch -eq 2048 -and $reg.batch_size) { $Batch = [int]$reg.batch_size }
+if ($UBatch -eq 2048 -and $reg.ubatch_size) { $UBatch = [int]$reg.ubatch_size }
+if ($isMoe -and $MoeOffload -ne "off" -and $Batch -eq 2048) { $Batch = 4096; $UBatch = 4096 }
+
 $mmprojFlags = if ($enableVision) { "--mmproj /models/$($reg.mmproj_file)" } else { "" }
+$loadFlags = if ($reg.load_flags) { $reg.load_flags } else { "" }
+
+# Resolve new per-model flags (CLI overrides > model defaults > off)
+$kvOffloadFlag  = if ($KvOffload -or $reg.kv_offload)  { "--kv-offload" }  else { "" }
+$repackFlag     = if ($Repack -or $reg.repack)         { "--repack" }      else { "" }
+$cacheRamVal    = if ($CacheRam -gt 0) { $CacheRam } elseif ($reg.cache_ram) { $reg.cache_ram } else { 0 }
+$cacheRamFlag   = if ($cacheRamVal -gt 0) { "--cache-ram $cacheRamVal" } else { "" }
+$ctxCpVal       = if ($CtxCheckpoints -gt 0) { $CtxCheckpoints } elseif ($reg.ctx_checkpoints) { $reg.ctx_checkpoints } else { 0 }
+$ctxCpFlag      = if ($ctxCpVal -gt 0) { "--ctx-checkpoints $ctxCpVal" } else { "" }
+$cpMinStepVal   = if ($CheckpointMinStep -gt 0) { $CheckpointMinStep } elseif ($reg.checkpoint_min_step) { $reg.checkpoint_min_step } else { 0 }
+$cpMinStepFlag  = if ($cpMinStepVal -gt 0) { "--checkpoint-min-step $cpMinStepVal" } else { "" }
 
 Write-Info ("Vision:    " + $(if ($enableVision) { "on" } else { "off" }))
 Write-Info ("Context:   $Context tokens" + $(if ($Parallel -gt 1) { " ($([int]($Context / $Parallel))/slot x $Parallel)" } else { "" }))
 Write-Info ("Reasoning: " + $(if ($Thinking) { "on" } else { "off" }))
 Write-Info ("Threads:   $Threads " + $(if ($threadsAuto) { "(auto from $logicalCpus CPUs)" } else { "(manual)" }))
 Write-Info ("Batch/UB:  $Batch / $UBatch")
-Write-Info ("KV cache:  $KvCache")
+Write-Info ("NGL:       $Ngl")
+Write-Info ("KV cache:  $KvCache" + $(if ($kvOffloadFlag) { " + kv-offload" } else { "" }))
 Write-Info ("MoE:       " + $(if ($isMoe) { if ($moeFlags) { "$MoeOffload (experts->CPU)" } else { "off (full GPU)" } } else { "n/a (dense)" }))
+if ($repackFlag) { Write-Info ("Repack:    on") }
+if ($cacheRamVal -gt 0) { Write-Info ("Cache RAM: $cacheRamVal MB") }
+if ($ctxCpVal -gt 0) { Write-Info ("Checkpoints: $ctxCpVal (min step $cpMinStepVal)") }
 
-$loadFlags = if ($reg.load_flags) { $reg.load_flags } else { "" }
-
-$env:MODEL_FILE        = $reg.file
-$env:MMPROJ_FLAGS      = $mmprojFlags
-$env:CONTEXT_SIZE      = $Context.ToString()
-$env:KV_CACHE_TYPE     = $KvCache
-$env:THREADS           = $Threads.ToString()
-$env:BATCH_SIZE        = $Batch.ToString()
-$env:UBATCH_SIZE       = $UBatch.ToString()
-$env:N_PARALLEL        = $Parallel.ToString()
-$env:REASONING         = if ($Thinking) { "on" } else { "off" }
-$env:MOE_FLAGS         = $moeFlags
-$env:LOAD_FLAGS        = $loadFlags
-$env:EXTRA_LLAMA_FLAGS = $ExtraFlags
+$env:MODEL_FILE            = $reg.file
+$env:MMPROJ_FLAGS          = $mmprojFlags
+$env:CONTEXT_SIZE          = $Context.ToString()
+$env:KV_CACHE_TYPE         = $KvCache
+$env:THREADS               = $Threads.ToString()
+$env:BATCH_SIZE            = $Batch.ToString()
+$env:UBATCH_SIZE           = $UBatch.ToString()
+$env:N_PARALLEL            = $Parallel.ToString()
+$env:N_GPU_LAYERS          = $Ngl.ToString()
+$env:REASONING             = if ($Thinking) { "on" } else { "off" }
+$env:MOE_FLAGS             = $moeFlags
+$env:LOAD_FLAGS            = $loadFlags
+$env:KV_OFFLOAD            = $kvOffloadFlag
+$env:REPACK                = $repackFlag
+$env:CACHE_RAM             = $cacheRamFlag
+$env:CTX_CHECKPOINTS       = $ctxCpFlag
+$env:CHECKPOINT_MIN_STEP   = $cpMinStepFlag
+$env:EXTRA_LLAMA_FLAGS     = $ExtraFlags
 Write-Ok "Environment set"
 
 # --- 4. Start / reconcile ----------------------------------------------------
