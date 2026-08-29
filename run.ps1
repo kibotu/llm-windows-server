@@ -9,8 +9,8 @@
     Face. The script stays in the foreground streaming logs; Ctrl+C stops
     streaming but leaves the server running. Use -Stop to tear it down.
 
-    Defaults target an RTX 4080 16 GB + 96 GB DDR5 box running Qwen3.6-35B-A3B
-    at IQ4_XS with vision, reasoning, and MoE experts offloaded to RAM.
+    Defaults target an RTX 4080 16 GB + 96 GB DDR5 box running Qwen3.8-27B IQ2_M
+    with KV offload, repack, and context checkpoints enabled.
 
 .PARAMETER Model
     Model id or alias from models.yaml. Use aliases like "big", "small", "tiny",
@@ -42,6 +42,21 @@
 
 .PARAMETER MoeOffload
     Expert offload: "auto"/"all" (experts to CPU), "off" (full GPU), or N (first N layers).
+
+.PARAMETER KvOffload
+    Offload KV cache to GPU (default: off unless model specifies).
+
+.PARAMETER Repack
+    Repack quantized weights for better GPU utilization (default: off unless model specifies).
+
+.PARAMETER CacheRam
+    RAM cache size in MB for context persistence (default: 0 = off unless model specifies).
+
+.PARAMETER CtxCheckpoints
+    Number of context checkpoints for long-context optimization (default: 0 = off unless model specifies).
+
+.PARAMETER CheckpointMinStep
+    Minimum token step between context checkpoints (default: 0 = off unless model specifies).
 
 .PARAMETER ExtraFlags
     Extra flags appended verbatim to llama-server.
@@ -86,11 +101,23 @@ param(
 
     [int]$UBatch = 2048,
 
+    [int]$Ngl = 99,
+
     [ValidateSet("q4_0", "q8_0", "f16", "")]
     [string]$KvCache = "",
 
     [ValidatePattern("^(auto|off|all|\d+)$")]
     [string]$MoeOffload = "auto",
+
+    [switch]$KvOffload,
+
+    [switch]$Repack,
+
+    [int]$CacheRam = 0,
+
+    [int]$CtxCheckpoints = 0,
+
+    [int]$CheckpointMinStep = 0,
 
     [string]$ExtraFlags = "",
 
@@ -116,7 +143,7 @@ $env:PYTHONUTF8 = "1"
 # =============================================================================
 function Load-ModelCatalog {
     $configPath = Join-Path $ScriptDir "model_config.py"
-    $json = & python $configPath 2>&1
+    $json = & uv run python $configPath 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Failed to load models.yaml: $json" }
     return $json | ConvertFrom-Json
 }
@@ -350,7 +377,7 @@ function Ensure-HostController {
     }
 
     Write-Info "Starting host controller on http://127.0.0.1:$port ..."
-    Start-Process -FilePath "python" -ArgumentList @($controller) -WorkingDirectory $ScriptDir -WindowStyle Hidden
+    Start-Process -FilePath "uv" -ArgumentList @("run", "python", $controller) -WorkingDirectory $ScriptDir -WindowStyle Hidden
     $deadline = (Get-Date).AddSeconds(10)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 500
@@ -400,7 +427,15 @@ function Ensure-McpServer {
     }
 
     Write-Info "Starting MCP server on http://127.0.0.1:$port/mcp ..."
-    Start-Process -FilePath "python" -ArgumentList @($server) -WorkingDirectory $ScriptDir -WindowStyle Hidden
+    $reqFile = Join-Path $ScriptDir "mcp\requirements.txt"
+    $uvArgs = @("run")
+    if (Test-Path $reqFile) { $uvArgs += @("--with-requirements", $reqFile) }
+    $uvArgs += @("python", $server)
+    $logFile = Join-Path $ScriptDir "logs\mcp-server.log"
+    $logDir = Split-Path $logFile -Parent
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    $proc = Start-Process -FilePath "uv" -ArgumentList $uvArgs -WorkingDirectory $ScriptDir `
+        -WindowStyle Hidden -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err" -PassThru
     $deadline = (Get-Date).AddSeconds(15)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 500
@@ -412,7 +447,18 @@ function Ensure-McpServer {
             }
         } catch { }
     }
-    Write-Warn "MCP server did not start; remote /mcp will be unavailable. Install deps: pip install -r mcp/requirements.txt"
+    $exited = $proc.HasExited
+    $exitCode = if ($exited) { $proc.ExitCode } else { "still running" }
+    Write-Warn "MCP server did not start (process exit: $exitCode). See logs\mcp-server.log"
+    if ($exited) {
+        $stderr = ""
+        $errPath = "$logFile.err"
+        if (Test-Path $errPath) { $stderr = (Get-Content $errPath -ErrorAction SilentlyContinue) -join "`n" }
+        $stdout = ""
+        if (Test-Path $logFile) { $stdout = (Get-Content $logFile -ErrorAction SilentlyContinue) -join "`n" }
+        $detail = if ($stderr) { $stderr } elseif ($stdout) { $stdout } else { "no output captured" }
+        $detail -split "`n" | Select-Object -First 15 | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
+    }
 }
 
 function Get-LocalIp {
@@ -426,42 +472,123 @@ function Get-LocalIp {
     return $adapters[0].IPAddress
 }
 
-function Set-HfDownloadEnvironment {
-    $env:PYTHONIOENCODING = "utf-8"
-    $env:PYTHONUTF8 = "1"
-    $env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
-    Remove-Item Env:HF_HUB_ENABLE_HF_TRANSFER -ErrorAction SilentlyContinue
+function Get-HfCacheDir {
+    if ($env:HF_HOME) {
+        $hubCache = Join-Path $env:HF_HOME "hub"
+        if (Test-Path $hubCache) { return $hubCache }
+    }
+    $default = Join-Path $env:USERPROFILE ".cache\huggingface\hub"
+    if (Test-Path $default) { return $default }
+    return $default
+}
+
+function Find-HfCacheFile {
+    param([string]$Repo, [string]$Include)
+    $hubCache = Get-HfCacheDir
+    if (-not (Test-Path $hubCache)) { return $null }
+
+    $repoDir = "models--" + ($Repo -replace "/", "--")
+    $repoPath = Join-Path $hubCache $repoDir
+    if (-not (Test-Path $repoPath)) { return $null }
+
+    $snapshots = Join-Path $repoPath "snapshots"
+    if (-not (Test-Path $snapshots)) { return $null }
+
+    $latest = Get-ChildItem $snapshots -Directory -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $latest) { return $null }
+
+    return Get-ChildItem $latest.FullName -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like $Include } | Select-Object -First 1
+}
+
+function New-HardlinkOrCopy {
+    param([string]$LinkPath, [string]$TargetPath)
+    if (Test-Path $LinkPath) {
+        $item = Get-Item $LinkPath -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            Remove-Item $LinkPath -Force -ErrorAction SilentlyContinue
+        } else {
+            cmd /c "del /f /q `"$LinkPath`"" 2>$null
+        }
+    }
+    $resolved = $TargetPath
+    $srcItem = Get-Item $TargetPath -Force -ErrorAction SilentlyContinue
+    if ($srcItem -and ($srcItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        $chain = cmd /c "dir `"$TargetPath`"" 2>$null | Select-String '\[([^\]]+)\]$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+        if ($chain) {
+            $resolved = $chain
+            if (-not [System.IO.Path]::IsPathRooted($chain)) {
+                $resolved = Join-Path (Split-Path $TargetPath -Parent) $chain
+            }
+        }
+    }
+    $null = fsutil hardlink create `"$LinkPath`" `"$resolved`" 2>&1
+    if (Test-Path $LinkPath) { return $true }
+    Copy-Item -LiteralPath $resolved -Destination $LinkPath -Force
+    return (Test-Path $LinkPath)
 }
 
 function Get-ModelFromHub {
     param([string]$Repo, [string]$Include, [string]$DestFile, [string]$Label)
-    Write-Info "Downloading $Label from $Repo ..."
+    $destPath = Join-Path $ScriptDir "models\$DestFile"
+
+    if (Test-Path $destPath) {
+        try {
+            $null = [System.IO.File]::OpenRead((Get-Item $destPath -Force).FullName).Dispose()
+            Write-Ok "$Label ready"
+            return
+        } catch {
+            Write-Warn "Existing $Label unreadable, re-downloading..."
+        }
+    }
+
     $hf = Get-Command hf -ErrorAction SilentlyContinue
     if (-not $hf) { $hf = Get-Command huggingface-cli -ErrorAction SilentlyContinue }
     if (-not $hf) { throw "'hf' CLI not found. Run .\setup.ps1 first." }
 
     $token = Get-DotEnvValue "HF_TOKEN"
     if ($token -and $token -ne "hf_xxx" -and -not $env:HF_TOKEN) { $env:HF_TOKEN = $token }
-    Set-HfDownloadEnvironment
+    $env:PYTHONIOENCODING = "utf-8"
+    $env:PYTHONUTF8 = "1"
+    Remove-Item Env:TQDM_POSITION -ErrorAction SilentlyContinue
+    Remove-Item Env:HF_HUB_ENABLE_HF_TRANSFER -ErrorAction SilentlyContinue
+    Remove-Item Env:HF_HUB_DISABLE_PROGRESS_BARS -ErrorAction SilentlyContinue
 
-    $tmp = Join-Path $env:TEMP ("hf_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
-    & $hf.Name download $Repo --include $Include --local-dir $tmp 2>&1 | Out-Null
-    $dlExit = $LASTEXITCODE
+    $cached = Find-HfCacheFile -Repo $Repo -Include $Include
+    if ($cached) {
+        Write-Info "Found $Label in HF cache, linking..."
+        $ok = New-HardlinkOrCopy -LinkPath $destPath -TargetPath $cached.FullName
+        if ($ok) {
+            Write-Ok "$Label ready (from HF cache)"
+            return
+        }
+    }
 
-    $file = Get-ChildItem $tmp -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like $DestFile } | Select-Object -First 1
-    if (-not $file) {
-        $file = Get-ChildItem $tmp -Recurse -File -Filter "*.gguf" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+    Write-Info "Downloading $Label from $Repo ..."
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try {
+        & $hf.Source download $Repo --include $Include
+        $dlExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
     }
-    if (-not $file) {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-        if ($dlExit -ne 0) { throw "Download failed for $Repo (pattern $Include)" }
-        throw "No matching file in download for $Label"
+
+    if ($dlExit -ne 0) {
+        throw "Download failed for $Repo (exit $dlExit, pattern: $Include)"
     }
-    Move-Item $file.FullName (Join-Path $ScriptDir "models\$DestFile") -Force
-    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Ok "$Label ready"
+
+    $cached = Find-HfCacheFile -Repo $Repo -Include $Include
+    if (-not $cached) {
+        throw "Download succeeded but no matching file in HF cache for $Label (pattern: $Include)"
+    }
+
+    $ok = New-HardlinkOrCopy -LinkPath $destPath -TargetPath $cached.FullName
+    if ($ok) {
+        Write-Ok "$Label ready (from HF cache)"
+    } else {
+        throw "Failed to link or copy $Label from HF cache"
+    }
 }
 
 # =============================================================================
@@ -505,6 +632,33 @@ if (-not (Test-Path $modelsDir)) { New-Item -ItemType Directory -Path $modelsDir
 $modelPath  = Join-Path $modelsDir $reg.file
 $mmprojPath = Join-Path $modelsDir $reg.mmproj_file
 
+foreach ($p in @($modelPath, $mmprojPath)) {
+    if (Test-Path $p) {
+        $item = Get-Item $p -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            $resolved = $p
+            for ($i = 0; $i -lt 10; $i++) {
+                $raw = cmd /c "dir `"$resolved`"" 2>$null | Select-String '\[([^\]]+)\]$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+                if (-not $raw) { break }
+                $next = $raw
+                if (-not [System.IO.Path]::IsPathRooted($raw)) {
+                    $next = Join-Path (Split-Path $resolved -Parent) $raw
+                }
+                $resolved = $next
+                $nextItem = Get-Item $resolved -Force -ErrorAction SilentlyContinue
+                if (-not $nextItem -or -not ($nextItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { break }
+            }
+            if ($resolved -ne $p -and (Test-Path $resolved)) {
+                Remove-Item $p -Force -ErrorAction SilentlyContinue
+                $null = fsutil hardlink create `"$p`" `"$resolved`" 2>&1
+                if (-not (Test-Path $p)) {
+                    Copy-Item -LiteralPath $resolved -Destination $p -Force
+                }
+            }
+        }
+    }
+}
+
 if (-not (Test-Path $modelPath)) {
     if ($NoDownload) { Write-Err "Model missing: $($reg.file) (remove -NoDownload to fetch it)"; exit 1 }
     Get-ModelFromHub -Repo $reg.repo -Include $reg.include -DestFile $reg.file -Label $reg.label
@@ -521,7 +675,11 @@ if ($enableVision -and -not (Test-Path $mmprojPath)) {
     Write-Warn "Vision projector not available - running without vision"
     $enableVision = $false
 }
-$modelGb = [math]::Round((Get-Item $modelPath).Length / 1GB, 2)
+$modelFile = Get-Item $modelPath -Force
+if ($modelFile.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    $modelFile = Get-Item (Resolve-Path $modelPath -ErrorAction SilentlyContinue) -Force -ErrorAction SilentlyContinue
+}
+$modelGb = [math]::Round($modelFile.Length / 1GB, 2)
 Write-Ok "$($reg.label) ($modelGb GB)"
 
 # --- 3. Configure ------------------------------------------------------------
@@ -544,33 +702,56 @@ if ($isMoe) {
         "off"  { $moeFlags = "" }
         default { if ($MoeOffload -match '^\d+$') { $moeFlags = "--n-cpu-moe $MoeOffload" } }
     }
-    if ($Batch -eq 2048 -and $UBatch -eq 2048 -and $MoeOffload -ne "off") { $Batch = 4096; $UBatch = 4096 }
 }
 
+# Use model-specific batch sizes if user hasn't overridden
+if ($Batch -eq 2048 -and $reg.batch_size) { $Batch = [int]$reg.batch_size }
+if ($UBatch -eq 2048 -and $reg.ubatch_size) { $UBatch = [int]$reg.ubatch_size }
+if ($isMoe -and $MoeOffload -ne "off" -and $Batch -eq 2048) { $Batch = 4096; $UBatch = 4096 }
+
 $mmprojFlags = if ($enableVision) { "--mmproj /models/$($reg.mmproj_file)" } else { "" }
+$loadFlags = if ($reg.load_flags) { $reg.load_flags } else { "" }
+
+# Resolve new per-model flags (CLI overrides > model defaults > off)
+$kvOffloadFlag  = if ($KvOffload -or $reg.kv_offload)  { "--kv-offload" }  else { "" }
+$repackFlag     = if ($Repack -or $reg.repack)         { "--repack" }      else { "" }
+$cacheRamVal    = if ($CacheRam -gt 0) { $CacheRam } elseif ($reg.cache_ram) { $reg.cache_ram } else { 0 }
+$cacheRamFlag   = if ($cacheRamVal -gt 0) { "--cache-ram $cacheRamVal" } else { "" }
+$ctxCpVal       = if ($CtxCheckpoints -gt 0) { $CtxCheckpoints } elseif ($reg.ctx_checkpoints) { $reg.ctx_checkpoints } else { 0 }
+$ctxCpFlag      = if ($ctxCpVal -gt 0) { "--ctx-checkpoints $ctxCpVal" } else { "" }
+$cpMinStepVal   = if ($CheckpointMinStep -gt 0) { $CheckpointMinStep } elseif ($reg.checkpoint_min_step) { $reg.checkpoint_min_step } else { 0 }
+$cpMinStepFlag  = if ($cpMinStepVal -gt 0) { "--checkpoint-min-step $cpMinStepVal" } else { "" }
 
 Write-Info ("Vision:    " + $(if ($enableVision) { "on" } else { "off" }))
 Write-Info ("Context:   $Context tokens" + $(if ($Parallel -gt 1) { " ($([int]($Context / $Parallel))/slot x $Parallel)" } else { "" }))
 Write-Info ("Reasoning: " + $(if ($Thinking) { "on" } else { "off" }))
 Write-Info ("Threads:   $Threads " + $(if ($threadsAuto) { "(auto from $logicalCpus CPUs)" } else { "(manual)" }))
 Write-Info ("Batch/UB:  $Batch / $UBatch")
-Write-Info ("KV cache:  $KvCache")
+Write-Info ("NGL:       $Ngl")
+Write-Info ("KV cache:  $KvCache" + $(if ($kvOffloadFlag) { " + kv-offload" } else { "" }))
 Write-Info ("MoE:       " + $(if ($isMoe) { if ($moeFlags) { "$MoeOffload (experts->CPU)" } else { "off (full GPU)" } } else { "n/a (dense)" }))
+if ($repackFlag) { Write-Info ("Repack:    on") }
+if ($cacheRamVal -gt 0) { Write-Info ("Cache RAM: $cacheRamVal MB") }
+if ($ctxCpVal -gt 0) { Write-Info ("Checkpoints: $ctxCpVal (min step $cpMinStepVal)") }
 
-$loadFlags = if ($reg.load_flags) { $reg.load_flags } else { "" }
-
-$env:MODEL_FILE        = $reg.file
-$env:MMPROJ_FLAGS      = $mmprojFlags
-$env:CONTEXT_SIZE      = $Context.ToString()
-$env:KV_CACHE_TYPE     = $KvCache
-$env:THREADS           = $Threads.ToString()
-$env:BATCH_SIZE        = $Batch.ToString()
-$env:UBATCH_SIZE       = $UBatch.ToString()
-$env:N_PARALLEL        = $Parallel.ToString()
-$env:REASONING         = if ($Thinking) { "on" } else { "off" }
-$env:MOE_FLAGS         = $moeFlags
-$env:LOAD_FLAGS        = $loadFlags
-$env:EXTRA_LLAMA_FLAGS = $ExtraFlags
+$env:MODEL_FILE            = $reg.file
+$env:MMPROJ_FLAGS          = $mmprojFlags
+$env:CONTEXT_SIZE          = $Context.ToString()
+$env:KV_CACHE_TYPE         = $KvCache
+$env:THREADS               = $Threads.ToString()
+$env:BATCH_SIZE            = $Batch.ToString()
+$env:UBATCH_SIZE           = $UBatch.ToString()
+$env:N_PARALLEL            = $Parallel.ToString()
+$env:N_GPU_LAYERS          = $Ngl.ToString()
+$env:REASONING             = if ($Thinking) { "on" } else { "off" }
+$env:MOE_FLAGS             = $moeFlags
+$env:LOAD_FLAGS            = $loadFlags
+$env:KV_OFFLOAD            = $kvOffloadFlag
+$env:REPACK                = $repackFlag
+$env:CACHE_RAM             = $cacheRamFlag
+$env:CTX_CHECKPOINTS       = $ctxCpFlag
+$env:CHECKPOINT_MIN_STEP   = $cpMinStepFlag
+$env:EXTRA_LLAMA_FLAGS     = $ExtraFlags
 Write-Ok "Environment set"
 
 # --- 4. Start / reconcile ----------------------------------------------------

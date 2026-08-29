@@ -8,9 +8,14 @@ Two scripts, one Docker command, sensible defaults for **Qwen3.6-35B-A3B** with 
 ## Quick start
 
 ```powershell
-.\setup.ps1     # install Docker + hf CLI, generate API key, pull image, download model
+.\setup.ps1     # verify prereqs, install Docker + hf CLI, generate API key, pull image, download model
 .\run.ps1       # start the server (stays in the foreground, streams logs)
 ```
+
+`setup.ps1` checks for Docker, Python, uv, and Git upfront. If Docker isn't
+installed, it auto-elevates to Administrator and installs it via winget. Model
+GGUF files are downloaded to the Hugging Face cache and symlinked into `.\models\`
+(Developer Mode or Administrator required for symlinks; otherwise files are copied).
 
 Before the first run, copy `.env.example` to `.env` and add your Hugging Face token.
 `setup.ps1` then generates a random `LLAMA_API_KEY` into `.env`, and `run.ps1` prints
@@ -155,7 +160,7 @@ client ──▶ gateway :8899 /mcp ──▶ mcp/server.py :8901 (Windows host)
 dependency install on the host:
 
 ```powershell
-pip install -r mcp/requirements.txt
+uv pip install -r mcp/requirements.txt
 ```
 
 Configure any client with a URL + bearer header (see `mcp/cursor-mcp.example.json`):
@@ -255,7 +260,9 @@ so `host_controller.py` and `mcp/server.py` are available.
 | `qwen35-9b` | Qwen3.5-9B Q4_K_M | ~5 GB | Yes | Lighter, dense, faster. |
 | `qwen35-4b` | [Qwen3.5-4B Q4_K_M](https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF) | ~3 GB | Yes | Tiny, dense, fastest. |
 
-Models download on demand into `.\models\` (gitignored). Switch with `-Model`:
+Models download on demand into `.\models\` (gitignored). Files are stored in the
+Hugging Face cache and symlinked to avoid duplication (copy fallback if symlinks
+aren't available). Switch with `-Model`:
 
 ```powershell
 .\run.ps1 -Model heretic
@@ -310,10 +317,11 @@ crash, health failure, or container exit:
 
 ### `setup.ps1` — setup + update in one
 
-Installs Docker Desktop, verifies GPU access, installs the latest Hugging Face CLI,
-pulls the latest llama.cpp image, rebuilds the gateway proxy, downloads the
-model (via the `hf` CLI reading `HF_TOKEN` from `.env`), opens the firewall, and
-prunes old Docker layers. Idempotent — re-run it to update.
+Verifies prerequisites, installs Docker Desktop (auto-elevating if needed),
+verifies GPU access, installs the latest `hf` CLI via `uv`, pulls the latest
+llama.cpp image, rebuilds the gateway proxy, downloads the model (via the `hf`
+CLI reading `HF_TOKEN` from `.env`), opens the firewall, and prunes old Docker
+layers. Idempotent — re-run it to update.
 
 ```powershell
 .\setup.ps1 [-Model qwen36|heretic|qwen35-9b|qwen35-4b] [-SkipModel] [-Clean]
@@ -330,6 +338,21 @@ prunes old Docker layers. Idempotent — re-run it to update.
 .\setup.ps1 -SkipModel       # update image + proxy only
 .\setup.ps1 -Clean           # update and reclaim disk
 ```
+
+#### Elevation & Developer Mode
+
+`setup.ps1` adapts to your privilege level:
+
+| Scenario | What happens |
+|----------|-------------|
+| Docker missing, not admin | Auto re-launches as Administrator (UAC prompt) |
+| Docker present, not admin | Runs normally; firewall rule skipped with manual `netsh` command |
+| `mklink` + Developer Mode | Symlinks work without elevation |
+| `mklink` + admin | Symlinks work |
+| `mklink` neither | Falls back to file copy (uses more disk) |
+
+Enable **Developer Mode** for seamless symlinks without elevation:
+Settings > System > For developers > Developer Mode.
 
 ## How it works
 
@@ -483,8 +506,22 @@ that cache and cause the slow "reprocessing from the system prompt" pause:
 | GPU | NVIDIA RTX 3060 12 GB (RTX 4080 16 GB recommended) |
 | RAM | 32 GB (96 GB recommended for MoE offload) |
 | OS | Windows 10/11 |
-| Docker | Desktop with WSL2 backend |
-| Python | 3.x (for the Hugging Face CLI) |
+| Docker | Desktop with WSL2 backend + **WSL Integration enabled** (Settings > Resources > WSL Integration) |
+| Python | 3.x + [uv](https://docs.astral.sh/uv/getting-started/installation/) (`irm https://astral.sh/uv/install.ps1 \| iex`) |
+| Git | Any recent version |
+| Hugging Face CLI | `hf` installed automatically by `setup.ps1` via `uv tool install --force hf` |
+
+All prerequisites are verified by `setup.ps1` step 0. If anything is missing,
+the script prints the exact install command and exits.
+
+> **GPU in Docker:** After installing Docker Desktop, enable WSL Integration
+> (`Settings > Resources > WSL Integration`) and add your WSL distro. Without
+> this, `docker run --gpus all` fails with a segmentation fault.
+
+> **Symlinks:** Model files are symlinked from the Hugging Face cache into
+> `.\models\` to avoid duplicating multi-GB files. This requires either
+> **Developer Mode** enabled or running as Administrator. Without either,
+> files are copied instead (same result, just uses more disk).
 
 ## License
 

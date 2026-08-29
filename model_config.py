@@ -75,6 +75,13 @@ def model_catalog_for_api(config_path: Path | str | None = None) -> list[dict[st
             "default_context": m.get("context", 262144),
             "default_kv_cache": m.get("kv_cache", "q8_0"),
             "moe": m.get("moe", False),
+            "kv_offload": m.get("kv_offload", False),
+            "repack": m.get("repack", False),
+            "cache_ram": m.get("cache_ram", 0),
+            "ctx_checkpoints": m.get("ctx_checkpoints", 0),
+            "checkpoint_min_step": m.get("checkpoint_min_step", 0),
+            "batch_size": m.get("batch_size", 2048),
+            "ubatch_size": m.get("ubatch_size", 2048),
         }
         for model_id, m in models.items()
     ]

@@ -1,6 +1,6 @@
 # Gateway image only. The LLM itself runs from the llama.cpp image
 # defined in docker-compose.yml (llm service); flags/env are documented there.
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
