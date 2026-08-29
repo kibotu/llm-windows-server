@@ -82,7 +82,7 @@ services:
       -c ${CONTEXT_SIZE:-262144}
       -ctk ${KV_CACHE_TYPE:-q8_0}
       -ctv ${KV_CACHE_TYPE:-q8_0}
-      -ngl 99
+      -ngl ${N_GPU_LAYERS:-99}
       -t ${THREADS:-10}
       -b ${BATCH_SIZE:-2048}
       -ub ${UBATCH_SIZE:-2048}
@@ -95,6 +95,11 @@ services:
       --reasoning-preserve
       --jinja
       --metrics
+      ${KV_OFFLOAD:-}
+      ${REPACK:-}
+      ${CACHE_RAM:-}
+      ${CTX_CHECKPOINTS:-}
+      ${CHECKPOINT_MIN_STEP:-}
       ${MOE_FLAGS:-}
       ${LOAD_FLAGS:---no-mmap --mlock --numa distribute}
       ${EXTRA_LLAMA_FLAGS:-}

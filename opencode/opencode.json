@@ -66,6 +66,62 @@
             "context": 32768,
             "output": 4000
           }
+        },
+        "qwen38-iq2m": {
+          "id": "/models/Qwen3.8-27B-Uncensored-IQ2_M.gguf",
+          "name": "Qwen3.8-27B IQ2_M (vision, MTP)",
+          "reasoning": true,
+          "attachment": true,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 163840,
+            "output": 8000
+          }
+        },
+        "qwen38-iq4xs": {
+          "id": "/models/Qwen3.8-27B-Uncensored-IQ4_XS.gguf",
+          "name": "Qwen3.8-27B IQ4_XS (vision, MTP)",
+          "reasoning": true,
+          "attachment": true,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 262144,
+            "output": 8000
+          }
+        },
+        "qwen38-q4km": {
+          "id": "/models/Qwen3.8-27B-Uncensored-Q4_K_M.gguf",
+          "name": "Qwen3.8-27B Q4_K_M (vision, MTP)",
+          "reasoning": true,
+          "attachment": true,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 262144,
+            "output": 8000
+          }
+        },
+        "qwen38-q5km": {
+          "id": "/models/Qwen3.8-27B-Uncensored-Q5_K_M.gguf",
+          "name": "Qwen3.8-27B Q5_K_M (vision, MTP)",
+          "reasoning": true,
+          "attachment": true,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 262144,
+            "output": 8000
+          }
         }
       }
     }
